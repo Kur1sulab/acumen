@@ -47,7 +47,7 @@ python3 -m vc.server --scan --force    # 忽略 mtime 缓存，全部重解析
 自定义：
 
 ```bash
-./run.sh --inbox ~/pentest/lzxf-1111/live-1116 --inbox ~/pentest-assets
+./run.sh --inbox ~/scans/target-a/live --inbox ~/scans/target-b
 ```
 
 **页面打开即整理**：前端一进来就 `POST /api/rescan`（按 mtime+size+内容指纹增量，未变文件 0 成本跳过），
@@ -113,7 +113,7 @@ vc/store.py         SQLite：去重合并 / 筛选 / 状态 / 导出
 vc/ingest.py        收件箱遍历、mtime+指纹增量
 vc/server.py        stdlib HTTP + JSON API + watcher
 vc/ui/              单页前端（无框架、无构建）
-tests/              18 个单测（含「指纹清单不能被当漏洞」回归）
+tests/              58 个单测（含「指纹清单不能被当漏洞」「CVE 只收规范编号」回归）
 ```
 
 测试：`python3 -m unittest discover -s tests -v`
