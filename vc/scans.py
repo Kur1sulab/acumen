@@ -292,7 +292,8 @@ class ScanManager:
             # 无参直接打印的还是帮助文本——第一行含 sweep 的是用法标题，不是版本号。
             for argv in ([self.engine, "version"], [self.engine]):
                 try:
-                    cp = subprocess.run(argv, capture_output=True, text=True, timeout=5)
+                    cp = subprocess.run(argv, capture_output=True, text=True,
+                                        encoding="utf-8", errors="replace", timeout=5)
                 except Exception:
                     continue
                 lines = [ln for ln in (cp.stdout or "").splitlines() if "sweep" in ln]
@@ -518,7 +519,8 @@ class ScanManager:
             with open(log_path, "w", encoding="utf-8") as logf:
                 proc = subprocess.Popen(
                     argv, cwd=job_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, bufsize=1, start_new_session=True)
+                    text=True, encoding="utf-8", errors="replace",
+                    bufsize=1, start_new_session=True)
                 with self._lock:
                     self._live[run_id]["proc"] = proc
                 deadline = time.time() + tmo

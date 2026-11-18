@@ -557,7 +557,22 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+def _force_utf8_stdout() -> None:
+    """把输出钉到 UTF-8。
+
+    Windows 控制台默认 cp936/cp1252：中文路径、引擎版本串里的 · 之类字符
+    会直接 UnicodeEncodeError，表现为「双击 bat 闪一下就没了」。
+    这里自己钉，不依赖用户去设 PYTHONIOENCODING。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+
 def main(argv: Optional[List[str]] = None) -> int:
+    _force_utf8_stdout()
     args = build_parser().parse_args(argv)
     ctx = Ctx(args)
     try:

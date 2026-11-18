@@ -254,7 +254,8 @@ def run_group(engine: str, plan: Dict[str, Any], timeout: int) -> Dict[str, Any]
     t0 = time.time()
     try:
         proc = subprocess.run([engine] + plan["argv"], cwd=tmp, capture_output=True,
-                              text=True, timeout=timeout)
+                              text=True, encoding="utf-8", errors="replace",
+                              timeout=timeout)
         out["elapsed"] = round(time.time() - t0, 1)
         tail = " ".join(((proc.stderr or "") + " " + (proc.stdout or "")).split())[-160:]
         if proc.returncode != 0:

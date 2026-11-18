@@ -47,6 +47,8 @@ from vc import __version__ as VERSION  # noqa: E402
 BUNDLE = f"kara-{VERSION}-win64"
 
 BAT = r"""@echo off
+rem 控制台默认 GBK，中文会花屏；Python 侧已钉 UTF-8，这里把 cmd 也切过来
+chcp 65001 >nul
 setlocal
 cd /d "%~dp0"
 

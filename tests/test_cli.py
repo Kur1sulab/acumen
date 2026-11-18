@@ -7,6 +7,7 @@
 import contextlib
 import io
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -195,6 +196,19 @@ class TestScanList(unittest.TestCase):
             self.assertEqual(code, 0, out)
             self.assertIn("http://a.com:8080", out)
             self.assertIn("dry-run", out.lower())
+
+    def test_ascii_console_does_not_crash(self):
+        """GBK/ASCII 控制台上不许崩 —— Windows 双击 bat 一闪而过就是这个原因。"""
+        with tempfile.TemporaryDirectory() as d:
+            env = dict(os.environ, PYTHONIOENCODING="ascii", PYTHONUTF8="0")
+            env.pop("PYTHONPATH", None)
+            p = subprocess.run([sys.executable, "-m", "vc.cli", "--db", os.path.join(d, "v.db")],
+                               cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            out = (p.stdout or b"").decode("utf-8", "replace")
+            self.assertEqual(p.returncode, 0, out)
+            self.assertNotIn("UnicodeEncodeError", out)
+            self.assertIn("Kara", out)
 
     def test_verify_without_targets(self):
         """白盒报告类条目没有可回访目标 —— 要说清楚，而不是装作跑过了。"""
