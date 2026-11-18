@@ -28,9 +28,11 @@ from typing import Any, Dict, List, Optional
 if __package__ in (None, ""):  # 允许 `python3 vc/server.py` 直接跑
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from vc.ingest import Ingestor
+    from vc.scans import MODES as SCAN_MODES, ScanError, ScanManager
     from vc.store import Store, STATUS_CHOICES
 else:
     from .ingest import Ingestor
+    from .scans import MODES as SCAN_MODES, ScanError, ScanManager
     from .store import Store, STATUS_CHOICES
 
 UI_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui")
@@ -43,6 +45,7 @@ MIME = {".html": "text/html; charset=utf-8", ".js": "application/javascript; cha
 class State:
     store: Store
     ingestor: Ingestor
+    scans: Optional[ScanManager] = None
     watcher: Optional[threading.Thread] = None
     stop = threading.Event()
 
@@ -95,6 +98,20 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlsplit(self.path)
         return {k: v[0] for k, v in urllib.parse.parse_qs(parsed.query).items()}
 
+    def _local_only(self) -> bool:
+        """扫描控制只对回环地址开放——即便有人 --host 0.0.0.0，远端也按不了扫描按钮。"""
+        addr = (self.client_address or ("",))[0]
+        return addr.startswith("127.") or addr in ("::1", "localhost", "::ffff:127.0.0.1")
+
+    def _need_scan(self):
+        if not self._local_only():
+            self._err(403, "扫描控制仅限本机访问")
+            return None
+        if STATE.scans is None:
+            self._err(503, "扫描控制未启用（--no-scan-control）")
+            return None
+        return STATE.scans
+
     # -------------------------------------------------------- 路由
 
     def do_GET(self) -> None:  # noqa: N802
@@ -136,6 +153,23 @@ class Handler(BaseHTTPRequestHandler):
                 body = STATE.store.export_csv(sev, status, qtext).encode("utf-8-sig")
                 return self._send(200, body, "text/csv; charset=utf-8",
                                   {"Content-Disposition": f'attachment; filename="vulns-{stamp}.csv"'})
+            if path == "/api/scan/meta":
+                sm = self._need_scan()
+                return sm and self._json(sm.meta())
+            if path == "/api/scan/jobs":
+                sm = self._need_scan()
+                return sm and self._json({"rows": sm.jobs(int(q.get("limit", 12) or 12)),
+                                          "active": sm.active()})
+            if path == "/api/scan/job":
+                sm = self._need_scan()
+                if not sm:
+                    return None
+                jid = int(q.get("id", 0) or 0)
+                log_from = q.get("log_from")
+                detail = sm.job(jid, None if log_from in (None, "") else int(log_from))
+                if not detail:
+                    return self._err(404, f"任务 #{jid} 不存在")
+                return self._json(detail)
             if path == "/api/health":
                 return self._json({"ok": True, "ts": time.time()})
             if path.startswith("/ui/"):
@@ -166,8 +200,29 @@ class Handler(BaseHTTPRequestHandler):
                 n = STATE.store.set_status(ids, str(body.get("status") or ""))
                 STATE.store.log("info", f"状态更新：{n} 条 → {body.get('status')}")
                 return self._json({"ok": True, "updated": n})
+            if path == "/api/scan/start":
+                sm = self._need_scan()
+                if not sm:
+                    return None
+                try:
+                    res = sm.start(str(body.get("mode") or ""), body.get("targets") or [],
+                                   parallel=body.get("parallel"), timeout=body.get("timeout"))
+                except ScanError as exc:
+                    return self._json({"ok": False, "error": str(exc)}, 400)
+                STATE.store.log("info", f"扫描任务 #{res.get('job_id')} 已启动："
+                                        f"{body.get('mode')} · {res.get('count')} 个目标")
+                return self._json(res)
+            if path == "/api/scan/stop":
+                sm = self._need_scan()
+                if not sm:
+                    return None
+                res = sm.stop(int(body.get("id") or 0))
+                STATE.store.log("info", f"扫描任务 #{body.get('id')} 停止请求：{res}")
+                return self._json(res)
         except ValueError as exc:
             return self._err(400, str(exc))
+        except ScanError as exc:
+            return self._json({"ok": False, "error": str(exc)}, 400)
         except Exception as exc:
             STATE.store.log("error", f"POST {path} 失败：{type(exc).__name__}: {exc}")
             return self._err(500, f"{type(exc).__name__}: {exc}")
@@ -225,6 +280,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--open", action="store_true", help="启动后自动打开浏览器")
     ap.add_argument("--no-watch", action="store_true", help="关闭后台自动摄入")
     ap.add_argument("--scan", action="store_true", help="只在命令行跑一次摄入然后退出")
+    ap.add_argument("--engine", default="", help="recon-go 可执行文件路径（默认自动查找）")
+    ap.add_argument("--scan-timeout", type=int, default=900, help="单目标扫描超时秒数")
+    ap.add_argument("--scan-parallel", type=int, default=2, help="同时跑几个目标（上限 4）")
+    ap.add_argument("--no-scan-control", action="store_true", help="关闭界面里的扫描控制")
     args = ap.parse_args(argv)
 
     inboxes = [os.path.expanduser(p) for p in (args.inbox or DEFAULT_INBOXES)]
@@ -245,12 +304,27 @@ def main(argv: Optional[List[str]] = None) -> int:
         STATE.watcher = threading.Thread(target=_watcher_loop, daemon=True)
         STATE.watcher.start()
 
+    if not args.no_scan_control:
+        STATE.scans = ScanManager(
+            db_path=args.db,
+            inbox_root=STATE.ingestor.inboxes[0],
+            engine=args.engine,
+            timeout=args.scan_timeout,
+            max_parallel=args.scan_parallel,
+            ingest_cb=STATE.ingestor.scan,
+        )
+
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     url = f"http://{args.host}:{args.port}/"
     STATE.store.log("info", f"服务启动：{url}　收件箱：{', '.join(STATE.ingestor.inboxes)}")
     print(f"[vuln-console] {url}")
     print(f"[vuln-console] 收件箱: {', '.join(STATE.ingestor.inboxes)}")
     print(f"[vuln-console] 数据库: {args.db}")
+    if STATE.scans:
+        if STATE.scans.engine:
+            print(f"[vuln-console] 扫描引擎: {STATE.scans.engine}")
+        else:
+            print("[vuln-console] 扫描引擎: 未找到 recon-go —— 界面里扫描按钮会提示构建命令")
     if args.open:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     try:
@@ -259,6 +333,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("\n[vuln-console] 收工")
     finally:
         STATE.stop.set()
+        if STATE.scans:
+            STATE.scans.shutdown()
         httpd.server_close()
     return 0
 

@@ -16,6 +16,20 @@
     logDetail: false,
   };
 
+  // 扫描页的状态（和列表页互不影响）
+  const SCAN_MODE_KEY = 'vc-scan-mode';
+  const scan = {
+    meta: null,
+    mode: 'all',
+    sel: 0,
+    logNext: 0,
+    active: 0,
+    wasActive: 0,
+    timer: null,
+    liveKey: '',
+    jobsKey: '',
+  };
+
   // ------------------------------------------------------------ 主题（默认白色，选择记在 localStorage）
   const THEME_KEY = 'vc-theme';
   function applyTheme(t) {
@@ -58,20 +72,73 @@
     return [s.findings, s.hits, s.assets, s.files, JSON.stringify(s.severity), s.last_scan].join('|');
   }
 
+  const SEV_CN = { critical: '严重', high: '高危', medium: '中危', low: '低危', info: '信息' };
+
+  const SEV_ICON = {
+    high: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.6l8.8 15.6H3.2L12 3.6z"/><path d="M12 10v4.3M12 17.1h.01"/></svg>',
+    medium: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.6l8.8 15.6H3.2L12 3.6z"/><path d="M12 10v4.3M12 17.1h.01"/></svg>',
+    lowinfo: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="12" cy="12" r="8"/><path d="M12 16.2v-4.6M12 8.5h.01"/></svg>',
+    todo: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.2"/><path d="M12 7.5V12l3 1.8"/></svg>',
+    done: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.2"/><path d="M8.4 12.2l2.4 2.4 4.8-4.9"/></svg>',
+  };
+
+  const sevSum = (sev, keys) => keys.reduce((a, k) => a + (Number(sev[k]) || 0), 0);
+
+  function statusN(s, want) {
+    const row = (s.by_status || []).find((x) => x.status === want);
+    return row ? (Number(row.n) || 0) : 0;
+  }
+
+  // 状态分段与筛选下拉必须同源，否则会出现「上面写着待审查、下拉却是全部」的自相矛盾
+  function syncStatusTabs() {
+    const box = $('#statusTabs');
+    if (box) {
+      box.querySelectorAll('.tab2').forEach((b) => b.classList.toggle('on', (b.dataset.st || '') === (state.status || '')));
+    }
+    const sf = $('#statusFilter');
+    if (sf && sf.value !== (state.status || '')) sf.value = state.status || '';
+  }
+
   function renderSummary(s) {
     state.lastSummaryKey = summaryKey(s);
-    const sevCards = ['critical', 'high', 'medium', 'low', 'info']
-      .map((k) => `<div class="stat ${k}"><div class="lab">${k}</div><div class="val">${fmtNum(s.severity[k])}</div></div>`)
-      .join('');
-    $('#stats').innerHTML =
-      `<div class="stat total"><div class="lab">条目 / 命中</div><div class="val">${fmtNum(s.findings)}<span class="muted" style="font-size:12px"> / ${fmtNum(s.hits)}</span></div></div>`
-      + sevCards
-      + `<div class="stat"><div class="lab">资产</div><div class="val">${fmtNum(s.assets)}</div></div>`;
+    const sv = s.severity || {};
+    const setN = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = fmtNum(v); };
 
-    const all = ['critical', 'high', 'medium', 'low', 'info']
-      .map((k) => `<button class="chip ${state.sev === k ? 'on' : ''}" data-sev="${k}">${k}<span class="n">${s.severity[k]}</span></button>`)
+    const lowInfo = sevSum(sv, ['low', 'info']);
+    const todo = statusN(s, '待验证');
+    const done = statusN(s, '已确认');
+
+    // 六联统计条：第一格「严重」用红点 + 特大数字 + 标签横排，其余五格统一「图标+标题 / 数字 / ● 说明」
+    const cards = [
+      { k: 'critical', label: '严重', n: sv.critical, hint: '需要立即处理' },
+      { k: 'high', label: '高危', n: sv.high, hint: '优先排查修复' },
+      { k: 'medium', label: '中危', n: sv.medium, hint: '纳入修复计划' },
+      { k: 'lowinfo', label: '低危/信息', n: lowInfo, hint: '持续跟踪确认' },
+      { k: 'todo', label: '待审查', n: todo, hint: '等待人工确认' },
+      { k: 'done', label: '已审查', n: done, hint: '已完成确认' },
+    ];
+
+    $('#stats').innerHTML = cards.map((c, i) => {
+      if (i === 0) {
+        return `<div class="six ${c.k} first">
+          <div class="row"><span class="blob"></span><span class="val">${fmtNum(c.n)}</span><span class="nm">${c.label}</span></div>
+          <div class="ft">${c.hint}</div>
+        </div>`;
+      }
+      const ico = SEV_ICON[c.k];
+      return `<div class="six ${c.k}">
+        <div class="hd">${ico ? `<span class="ico">${ico}</span>` : ''}${c.label}</div>
+        <div class="val">${fmtNum(c.n)}</div>
+        <div class="ft">${c.hint}</div>
+      </div>`;
+    }).join('');
+
+    // 严重度 chips（收在筛选面板里，中文标签 + 计数）
+    const chips = ['critical', 'high', 'medium', 'low', 'info']
+      .map((k) => `<button class="chip ${state.sev === k ? 'on' : ''}" data-sev="${k}">${SEV_CN[k]}<span class="n">${fmtNum(sv[k])}</span></button>`)
       .join('');
-    $('#sevChips').innerHTML = `<button class="chip ${state.sev === '' ? 'on' : ''}" data-sev="">全部<span class="n">${s.findings}</span></button>` + all;
+    $('#sevChips').innerHTML =
+      `<button class="chip ${state.sev === '' ? 'on' : ''}" data-sev="">全部<span class="n">${fmtNum(s.findings)}</span></button>` + chips;
 
     $('#topAssets').innerHTML = (s.top_assets || []).length
       ? s.top_assets.map((a) => `<li class="clickable" data-asset="${esc(a.asset)}"><span class="k mono">${esc(a.asset || '(空)')}</span><span class="v">${a.n}</span></li>`).join('')
@@ -81,10 +148,22 @@
       ? s.by_type.map((t) => `<li class="clickable" data-q="${esc(t.title)}"><span class="k">${esc(t.title)}</span><span class="v">${t.n}</span></li>`).join('')
       : '<li class="muted">暂无</li>';
 
-    $('#lastScan').textContent = s.last_scan ? ('最近整理 ' + s.last_scan) : '尚未整理';
-    $('#tabN-findings').textContent = s.findings;
-    $('#tabN-assets').textContent = s.assets;
-    $('#tabN-files').textContent = s.files;
+    // 分段计数 + 顶栏元信息
+    setN('nAll', s.findings);
+    setN('nTodo', todo);
+    setN('nDone', done);
+
+    const meta = $('#topMeta');
+    if (meta) {
+      meta.textContent = `${fmtNum(s.findings)} 条漏洞 · ${fmtNum(s.hits)} 次命中 · ${fmtNum(s.assets)} 个资产 · ${fmtNum(s.files)} 个文件`;
+    }
+
+    const ls = $('#lastScan');
+    if (ls) ls.textContent = s.last_scan ? ('最近整理 ' + s.last_scan) : '尚未整理';
+
+    setN('tabN-findings', s.findings);
+    setN('tabN-assets', s.assets);
+    setN('tabN-files', s.files);
   }
 
   // ------------------------------------------------------------ 漏洞表
@@ -97,16 +176,30 @@
     const fileBase = (r.files || '').split('/').pop();
     const srcHint = (!r.asset && fileBase) ? `<div class="src-hint" title="${esc(r.files)}">↳ ${esc(fileBase)}</div>` : '';
     const statusOpts = ['待验证', '已确认', '误报', '已修复', '已忽略']
-      .map((s) => `<option ${s === r.status ? 'selected' : ''}>${s}</option>`).join('');
+      .map((x) => `<option ${x === r.status ? 'selected' : ''}>${x}</option>`).join('');
+
+    const sevCn = SEV_CN[r.sev] || r.sev || '—';
+
+    // URL 列：有资产就拼成 http(s)://host:port/端点（跟天穹那个 URL 列一个意思），没资产就退回端点原文
+    let url = '';
+    if (r.asset) {
+      const ep = String(r.endpoint || '');
+      url = /^https?:\/\//i.test(ep)
+        ? ep
+        : 'https://' + r.asset + (r.port ? ':' + r.port : '') + (ep ? '/' + ep.replace(/^\/+/, '') : '');
+    } else {
+      url = String(r.endpoint || '');
+    }
+
     return `<tr class="${sel}" data-id="${r.id}">
-      <td><input type="checkbox" class="rowCheck" data-id="${r.id}" ${sel ? 'checked' : ''}></td>
-      <td><span class="sev ${esc(r.sev)}">${esc(r.sev)}</span></td>
-      <td><div class="title-cell">${esc(r.title)}</div>${ev}</td>
-      <td class="mono">${r.asset ? esc(r.asset) : ''}${r.port ? `<div class="par">:${esc(r.port)}</div>` : ''}${srcHint || (r.asset ? '' : '<span class="muted">—</span>')}</td>
-      <td><div class="ep">${esc(r.endpoint || '—')}</div>${par}</td>
-      <td class="mono nowrap" style="text-align:right">${r.count}</td>
-      <td class="mono">${esc(r.sources)}</td>
+      <td class="w-check"><input type="checkbox" class="rowCheck" data-id="${r.id}" ${sel ? 'checked' : ''}></td>
       <td><select class="status-select" data-id="${r.id}" data-s="${esc(r.status)}">${statusOpts}</select></td>
+      <td><span class="sev ${esc(r.sev)}">${esc(sevCn)}</span></td>
+      <td class="mono src-cell">${esc(r.sources)}</td>
+      <td><div class="title-cell">${esc(r.title)}</div>${ev}</td>
+      <td class="asset-cell">${r.asset ? esc(r.asset) : '<span class="muted">—</span>'}${r.port ? `<div class="par">:${esc(r.port)}</div>` : ''}${srcHint}</td>
+      <td>${url ? `<div class="ep" title="${esc(url)}">${esc(url)}</div>` : '<span class="muted">—</span>'}${par}</td>
+      <td class="mono nowrap" style="text-align:right">${r.count}</td>
       <td class="mono muted nowrap">${esc((r.first_seen || '').slice(0, 16))}</td>
     </tr>`;
   }
@@ -131,10 +224,15 @@
 
   function renderSelInfo() {
     const n = state.selected.size;
-    $('#selInfo').textContent = n ? `已选 ${n} 条` : '未选中';
+    const total = Number(state.total) || 0;
+    // 天穹式底部计数：「已选择 N 项 / 共 M 条」
+    const fc = $('#footCount');
+    if (fc) fc.textContent = `已选择 ${n} 项 / 共 ${total} 条`;
+    const si = $('#selInfo');
+    if (si) si.textContent = n ? `已选择 ${n} 项` : '未选中';
     const all = document.querySelectorAll('.rowCheck');
     const checkAll = $('#checkAll');
-    if (checkAll) checkAll.checked = n > 0 && Array.from(all).every((c) => c.checked);
+    if (checkAll) checkAll.checked = n > 0 && all.length > 0 && Array.from(all).every((c) => c.checked);
   }
 
   // ------------------------------------------------------------ 资产 / 文件 / 日志
@@ -276,6 +374,325 @@
     pre.scrollTop = pre.scrollHeight;
   }
 
+  // ------------------------------------------------------------ 扫描控制
+
+  const SCAN_LABEL = {
+    queued: '排队中', running: '运行中', stopping: '停止中', ok: '已完成',
+    partial: '部分完成', failed: '失败', stopped: '已停止', interrupted: '已中断',
+  };
+  const scanStatus = (s) => SCAN_LABEL[s] || s || '未知';
+
+  function fmtDur(sec) {
+    const s = Math.max(0, Math.round(Number(sec) || 0));
+    if (s < 60) return s + 's';
+    if (s < 3600) return Math.floor(s / 60) + 'm' + String(s % 60).padStart(2, '0') + 's';
+    return Math.floor(s / 3600) + 'h' + String(Math.floor((s % 3600) / 60)).padStart(2, '0') + 'm';
+  }
+
+  function fmtClock(ts) {
+    if (!ts) return '—';
+    const d = new Date(ts * 1000);
+    const p = (n) => String(n).padStart(2, '0');
+    return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+
+  function targetList() {
+    const box = $('#scanTargets');
+    return box ? box.value.split('\n').map((s) => s.trim()).filter(Boolean) : [];
+  }
+
+  function countTargets() {
+    const n = targetList().length;
+    const el = $('#tgtCount');
+    if (el) el.textContent = n + ' 个';
+  }
+
+  function renderModes() {
+    const box = $('#scanModes');
+    if (!box) return;
+    const modes = (scan.meta && scan.meta.modes) || [];
+    if (!modes.length) {
+      box.innerHTML = '<span class="muted mono" style="grid-column:1/-1">拿不到模式表</span>';
+      return;
+    }
+    if (!modes.some((m) => m.id === scan.mode)) scan.mode = modes[0].id;
+    box.innerHTML = modes.map((m) => `
+      <button type="button" class="modebtn ${m.id === scan.mode ? 'on' : ''}" data-mode="${esc(m.id)}"
+              title="${esc(m.hint || '')}">
+        <span>${esc(m.label)}</span><span class="mh">${esc(m.hint || m.kind)}</span>
+      </button>`).join('');
+  }
+
+  async function loadScanMeta() {
+    const bar = $('#scanEngine');
+    try {
+      const m = await api('/api/scan/meta');
+      scan.meta = m;
+      const eng = m.engine || {};
+      bar.classList.toggle('bad', !eng.ok);
+      bar.innerHTML = eng.ok
+        ? `<span class="pip"></span><span>引擎就绪 <code>${esc(eng.path)}</code></span>`
+        : `<span class="pip"></span><span>没找到扫描引擎</span><div class="hintline">${esc(eng.hint || '')}</div>`;
+      const d = m.defaults || {};
+      const lim = m.limits || {};
+      if (d.parallel) $('#scanParallel').value = d.parallel;
+      if (d.timeout) $('#scanTimeout').value = d.timeout;
+      if (lim.max_parallel) $('#scanParallel').max = lim.max_parallel;
+      renderModes();
+      countTargets();
+    } catch (err) {
+      bar.classList.add('bad');
+      bar.innerHTML = `<span class="pip"></span><span>扫描接口不可用：${esc(err.message)}</span>`;
+    }
+  }
+
+  function jobRow(j) {
+    const c = j.counts || {};
+    const meta = `${c.ok || 0}/${c.total || 0} 目标 · ${j.findings || 0} 命中 · ${fmtDur(j.elapsed)}`;
+    return `<div class="job ${j.id === scan.sel ? 'on' : ''}" data-job="${j.id}" role="button" tabindex="0"
+                 title="${esc((j.targets || []).slice(0, 6).join('  '))}">
+      <span class="jid">#${j.id}</span>
+      <span class="jmode">${esc(j.mode_label || j.mode)}</span>
+      <span class="jstat ${esc(j.status)}">${esc(scanStatus(j.status))}</span>
+      <span class="jmeta">${esc(meta)}</span>
+      <span class="jt">${esc(fmtClock(j.created))}</span>
+    </div>`;
+  }
+
+  function jobsKeyOf(rows) {
+    return rows.map((j) => `${j.id}:${j.status}:${(j.counts || {}).ok}:${j.findings}`).join('|');
+  }
+
+  async function loadScanJobs() {
+    const data = await api('/api/scan/jobs?limit=12');
+    const rows = data.rows || [];
+    scan.active = Number(data.active || 0);
+    const badge = $('#tabN-scan');
+    if (badge) badge.textContent = scan.active ? String(scan.active) : '';
+
+    const box = $('#scanJobs');
+    const key = jobsKeyOf(rows);
+    if (key !== scan.jobsKey) {
+      scan.jobsKey = key;
+      box.innerHTML = rows.length
+        ? rows.map(jobRow).join('')
+        : '<div class="jobs-empty">还没有扫描任务</div>';
+    }
+    // 跑完那一刻把漏洞列表也刷一遍，别让新结果躺在收件箱里等
+    const justFinished = scan.active === 0 && scan.wasActive > 0;
+    scan.wasActive = scan.active;
+    if (justFinished) await refreshAll('扫描结束，结果已入账');
+    return rows;
+  }
+
+  function donePct(j) {
+    const c = j.counts || {};
+    const total = Number(c.total) || 0;
+    if (!total) return j.status === 'ok' ? 100 : 0;
+    const done = (c.ok || 0) + (c.failed || 0) + (c.stopped || 0) + (c.timeout || 0) + (c.interrupted || 0);
+    return Math.round((done / total) * 100);
+  }
+
+  function stepsHtml(run) {
+    const steps = run.steps || [];
+    const expect = Math.max(Number(run.expect) || 0, steps.length);
+    let out = '';
+    for (let i = 0; i < Math.min(expect, 14); i += 1) {
+      const s = steps[i];
+      const cls = s ? (s.status === 'done' || s.status === 'skipped' ? 'done'
+        : (s.status === 'failed' ? 'failed' : 'run')) : '';
+      out += `<span class="step ${cls}" title="${esc(s ? (s.name + ' · ' + scanStatus(s.status)) : '待执行')}"></span>`;
+    }
+    return `<span class="steps">${out}</span>`;
+  }
+
+  function trowHtml(run) {
+    const st = run.status || 'queued';
+    const pct = Number(run.pct) || 0;
+    const tail = run.error
+      ? `失败：${run.error}`
+      : (st === 'running' ? (run.step ? '正在跑 ' + run.step : '启动中…') : `${pct}% · 退出码 ${run.exit_code == null ? '—' : run.exit_code}`);
+    return `<div class="trow ${esc(st)}">
+      <div class="tname">${esc(run.target)}
+        <span class="sub2">${esc(tail)}</span>
+      </div>
+      ${stepsHtml(run)}
+      <span class="tpct">${pct}%</span>
+    </div>`;
+  }
+
+  function appendScanLog(lines) {
+    const el = $('#scanLog');
+    if (!el || !lines || !lines.length) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+    const frag = document.createDocumentFragment();
+    lines.forEach((ln) => {
+      const d = document.createElement('div');
+      d.className = /失败|错误|error|panic|timeout|超时/i.test(ln) ? 'err' : '';
+      d.textContent = ln;
+      frag.appendChild(d);
+    });
+    el.appendChild(frag);
+    while (el.childElementCount > 600) el.removeChild(el.firstChild);
+    if (atBottom) el.scrollTop = el.scrollHeight;
+    const n = $('#scanLogN');
+    if (n) n.textContent = el.childElementCount + ' 行';
+  }
+
+  function liveSkeleton(j) {
+    const st = j.status || '';
+    const running = st === 'queued' || st === 'running' || st === 'stopping';
+    return `<div class="live-head">
+        <span class="live-title">#${j.id} ${esc(j.mode_label || j.mode || '')}</span>
+        <span class="jstat ${esc(st)}" id="liveStat">${esc(scanStatus(st))}</span>
+        <span class="live-meta" id="liveTime">起 ${esc(fmtClock(j.created))} · 用时 ${esc(fmtDur(j.elapsed))}</span>
+        <span class="grow"></span>
+        <span class="live-meta" id="liveCounts"></span>
+        <button class="btn ghost small ${running ? 'danger' : ''}" id="btnScanStop" data-job="${j.id}"
+                ${running ? '' : 'disabled'}>${st === 'stopping' ? '停止中…' : '停止'}</button>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 13px 5px">
+        <div class="pbar"><i id="liveBar" class="${running ? 'run' : ''}" style="width:0%"></i></div>
+        <span class="live-meta" id="livePct" style="min-width:40px;text-align:right">0%</span>
+      </div>
+      <div class="tlist" id="scanTlist"></div>
+      <div class="scanlogwrap">
+        <div class="scanloghead"><span>进度日志</span><span id="scanLogN" class="mono"></span></div>
+        <pre class="scanlog" id="scanLog"></pre>
+      </div>`;
+  }
+
+  function renderLive(j, append) {
+    const box = $('#scanLive');
+    if (!box) return;
+    const st = j.status || '';
+    const running = st === 'queued' || st === 'running' || st === 'stopping';
+
+    if (scan.liveKey !== String(j.id)) {
+      scan.liveKey = String(j.id);
+      box.innerHTML = liveSkeleton(j);
+      append = false;
+    }
+
+    const stat = $('#liveStat');
+    if (stat) {
+      stat.className = 'jstat ' + st;
+      stat.textContent = scanStatus(st);
+    }
+    const time = $('#liveTime');
+    if (time) {
+      time.textContent = `起 ${fmtClock(j.created)}` + (j.finished ? ` · 止 ${fmtClock(j.finished)}` : '')
+        + ` · 用时 ${fmtDur(j.elapsed)}`;
+    }
+    const c = j.counts || {};
+    const counts = $('#liveCounts');
+    if (counts) counts.textContent = `${c.ok || 0}/${c.total || 0} 目标 · ${j.findings || 0} 命中`;
+
+    const stop = $('#btnScanStop');
+    if (stop) {
+      stop.disabled = !running;
+      stop.textContent = st === 'stopping' ? '停止中…' : '停止';
+      stop.classList.toggle('danger', running);
+    }
+
+    const pct = donePct(j);
+    const bar = $('#liveBar');
+    if (bar) {
+      bar.style.width = pct + '%';
+      bar.classList.toggle('run', running);
+    }
+    const pt = $('#livePct');
+    if (pt) pt.textContent = pct + '%';
+
+    const list = $('#scanTlist');
+    if (list) {
+      const rows = j.runs || [];
+      const keep = list.scrollTop;
+      list.innerHTML = rows.length
+        ? rows.map(trowHtml).join('')
+        : '<div class="muted center" style="padding:22px">目标还没开始跑</div>';
+      list.scrollTop = keep;
+    }
+
+    if (!append) $('#scanLog').innerHTML = '';
+    appendScanLog((j.log && j.log.lines) || []);
+  }
+
+  async function openJob(id, opts) {
+    opts = opts || {};
+    if (opts.reset) { scan.logNext = 0; scan.liveKey = ''; }
+    scan.sel = id;
+    const qs = new URLSearchParams({ id: String(id) });
+    if (scan.logNext) qs.set('log_from', String(scan.logNext));
+    const j = await api('/api/scan/job?' + qs.toString());
+    renderLive(j, !!scan.logNext);
+    scan.logNext = (j.log && j.log.next) || 0;
+    document.querySelectorAll('#scanJobs .job').forEach((el) => {
+      el.classList.toggle('on', Number(el.dataset.job) === id);
+    });
+    return j;
+  }
+
+  async function startScan() {
+    const targets = targetList();
+    if (!targets.length) { toast('先填目标：一行一个'); $('#scanTargets').focus(); return; }
+    const btn = $('#btnScanStart');
+    const old = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '启动中…';
+    try {
+      const r = await api('/api/scan/start', {
+        method: 'POST',
+        body: JSON.stringify({
+          mode: scan.mode,
+          targets,
+          parallel: Number($('#scanParallel').value) || undefined,
+          timeout: Number($('#scanTimeout').value) || undefined,
+        }),
+      });
+      scan.sel = r.job_id;
+      scan.liveKey = '';
+      scan.logNext = 0;
+      toast(`任务 #${r.job_id} 已启动：${r.count} 个目标`);
+      await loadScanJobs();
+      await openJob(r.job_id, { reset: true });
+      ensureScanPoll();
+    } catch (err) {
+      toast('启动失败：' + err.message, 6000);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = old;
+    }
+  }
+
+  function ensureScanPoll() {
+    if (scan.timer) return;
+    scan.timer = setInterval(async () => {
+      if (state.tab !== 'scan' && scan.active === 0) {
+        clearInterval(scan.timer);
+        scan.timer = null;
+        return;
+      }
+      try {
+        await loadScanJobs();
+        if (scan.sel) await openJob(scan.sel);
+      } catch (_) { /* 静默：下一轮再试 */ }
+    }, 1500);
+  }
+
+  async function loadScan() {
+    if (!scan.meta) await loadScanMeta();
+    try {
+      await loadScanJobs();
+    } catch (err) {
+      toast('扫描任务列表读取失败：' + err.message, 5000);
+    }
+    if (scan.sel) {
+      try { await openJob(scan.sel, { reset: true }); } catch (_) { scan.sel = 0; }
+    }
+    ensureScanPoll();
+  }
+
   // ------------------------------------------------------------ 刷新编排
 
   async function refreshAll(reason) {
@@ -285,14 +702,16 @@
     if (state.tab === 'assets') await loadAssets();
     if (state.tab === 'files') await loadFiles();
     if (state.tab === 'log') await loadLog();
+    if (state.tab === 'scan') await loadScan();
     if (reason) toast(reason);
   }
 
   async function rescan(force) {
     const btn = force ? $('#btnForce') : $('#btnRescan');
-    const old = btn.textContent;
+    const lbl = btn.querySelector('.lbl') || btn;
+    const old = lbl.textContent;
     btn.disabled = true;
-    btn.textContent = force ? '重解析中…' : '整理中…';
+    lbl.textContent = force ? '重解析中…' : '整理中…';
     try {
       const data = await api('/api/rescan', { method: 'POST', body: JSON.stringify({ force: !!force }) });
       const st = data.stats || {};
@@ -307,7 +726,7 @@
       toast('整理失败：' + err.message, 6000);
     } finally {
       btn.disabled = false;
-      btn.textContent = old;
+      lbl.textContent = old;
     }
   }
 
@@ -357,11 +776,40 @@
         return;
       }
 
+      // 扫描页：模式选择 / 任务切换 / 停止 / 清空
+      const mb = e.target.closest('.modebtn[data-mode]');
+      if (mb) {
+        scan.mode = mb.dataset.mode;
+        try { localStorage.setItem(SCAN_MODE_KEY, scan.mode); } catch (err) { /* 隐私模式忽略 */ }
+        document.querySelectorAll('#scanModes .modebtn').forEach((b) => b.classList.toggle('on', b === mb));
+        return;
+      }
+      if (e.target.id === 'btnScanClear') { $('#scanTargets').value = ''; countTargets(); $('#scanTargets').focus(); return; }
+      const stopBtn = e.target.closest('#btnScanStop');
+      if (stopBtn) {
+        const id = Number(stopBtn.dataset.job);
+        stopBtn.disabled = true;
+        try {
+          const r = await api('/api/scan/stop', { method: 'POST', body: JSON.stringify({ id }) });
+          toast(`任务 #${id} 停止请求已发（结束 ${r.killed || 0} 个进程）`);
+          await openJob(id);
+        } catch (err) {
+          toast('停止失败：' + err.message, 5000);
+        }
+        return;
+      }
+      const jobEl = e.target.closest('.job[data-job]');
+      if (jobEl) {
+        await openJob(Number(jobEl.dataset.job), { reset: true });
+        ensureScanPoll();
+        return;
+      }
+
       const tab = e.target.closest('.tab');
       if (tab) {
         state.tab = tab.dataset.tab;
         document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t === tab));
-        ['findings', 'assets', 'files', 'log'].forEach((k) => {
+        ['findings', 'assets', 'scan', 'files', 'log'].forEach((k) => {
           $('#view-' + k).classList.toggle('hidden', k !== state.tab);
         });
         await refreshAll('');
@@ -372,6 +820,8 @@
     document.addEventListener('keydown', (e) => {
       const card = e.target.closest && e.target.closest('.acard[data-asset]');
       if (card && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); card.click(); }
+      const jobEl = e.target.closest && e.target.closest('.job[data-job]');
+      if (jobEl && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); jobEl.click(); }
     });
 
     document.addEventListener('change', async (e) => {
@@ -404,7 +854,13 @@
         renderSelInfo();
         return;
       }
-      if (e.target.id === 'statusFilter') { state.status = e.target.value; state.offset = 0; await loadFindings(); return; }
+      if (e.target.id === 'statusFilter') {
+        state.status = e.target.value;
+        state.offset = 0;
+        syncStatusTabs();
+        await loadFindings();
+        return;
+      }
       if (e.target.id === 'bulkStatus') {
         const status = e.target.value;
         if (!status) return;
@@ -420,6 +876,17 @@
       }
       if (e.target.id === 'autoRefresh') { state.autoRefresh = e.target.checked; return; }
     });
+
+    // 扫描表单：回车即开扫，目标数随手数
+    const scanForm = $('#scanForm');
+    if (scanForm) {
+      scanForm.addEventListener('submit', (e) => { e.preventDefault(); startScan(); });
+      $('#scanTargets').addEventListener('input', countTargets);
+      $('#scanTargets').addEventListener('keydown', (e) => {
+        // Ctrl/⌘+Enter 直接开扫（普通回车留给换行）
+        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); startScan(); }
+      });
+    }
 
     let timer = null;
     $('#search').addEventListener('input', (e) => {
@@ -456,6 +923,34 @@
     };
     $('#expCSV').addEventListener('click', exportFiltered);
     $('#expMD').addEventListener('click', exportFiltered);
+    // 状态分段（全部漏洞 / 待审查 / 已审查）——与筛选面板里的状态下拉同源
+    const statusTabs = $('#statusTabs');
+    if (statusTabs) {
+      statusTabs.addEventListener('click', async (e) => {
+        const btn = e.target.closest('.tab2');
+        if (!btn) return;
+        state.status = btn.dataset.st || '';
+        state.offset = 0;
+        syncStatusTabs();
+        if (state.tab !== 'findings') {
+          const t = document.querySelector('.tab[data-tab="findings"]');
+          if (t) t.click();
+        } else {
+          await loadFindings();
+        }
+      });
+    }
+
+    // 筛选面板开关（默认收起，主区干净；严重度/状态/TOP 排行都在里面）
+    const btnFilter = $('#btnFilter');
+    const filterPanel = $('#filterPanel');
+    if (btnFilter && filterPanel) {
+      btnFilter.addEventListener('click', () => {
+        const closed = filterPanel.classList.toggle('hidden');
+        btnFilter.classList.toggle('on', !closed);
+      });
+    }
+
     $('#btnTheme').addEventListener('click', () => {
       applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
     });
@@ -492,7 +987,12 @@
 
   async function boot() {
     try { applyTheme(localStorage.getItem(THEME_KEY) || 'light'); } catch (e) { applyTheme('light'); }
+    try {
+      const saved = localStorage.getItem(SCAN_MODE_KEY);
+      if (saved) scan.mode = saved;
+    } catch (e) { /* 隐私模式忽略 */ }
     bind();
+    loadScanMeta();   // 引擎探测放后台，不挡首屏
     try {
       await rescan(false); // 打开即自动整理
     } catch (err) {
