@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: 单测 · py${{ matrix.python }} @ ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.9", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: 跑单测
+        run: python -m unittest discover -s tests -v
+
+  zero-dep:
+    name: 零依赖自检
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 全部 import 必须来自标准库
+        run: python tools/check_zero_deps.py
+
+  frontend:
+    name: 前端零构建自检
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: JS 语法检查
+        run: |
+          set -e
+          for js in $(find vc/ui -name '*.js'); do
+            node --check "$js"
+            echo "OK  $js"
+          done
