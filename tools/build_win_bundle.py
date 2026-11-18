@@ -137,6 +137,21 @@ A: 在解压目录执行：
 """
 
 
+def _force_utf8_stdout() -> None:
+    """把 stdout/stderr 钉到 UTF-8。
+
+    为什么必须做：Windows 控制台默认码页是 cp936，但 CI runner / 英文版
+    Windows / 重定向到管道时是 cp1252 或 cp437，print 一个中文就
+    UnicodeEncodeError 崩掉——而且崩在日志第一行，看起来像"程序根本没跑"。
+    依赖外部设 PYTHONIOENCODING 不可靠（用户不会设），所以脚本自己钉。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+
 def eprint(*a: object) -> None:
     print(*a)
 
@@ -249,6 +264,7 @@ def main() -> int:
                     help="官方 python-3.12.x-embed-amd64.zip 的本地路径")
     ap.add_argument("--out", default="dist", help="输出目录（默认 dist）")
     args = ap.parse_args()
+    _force_utf8_stdout()
 
     py_zip = Path(args.python_zip).expanduser().resolve()
     out_dir = (ROOT / args.out).resolve()
