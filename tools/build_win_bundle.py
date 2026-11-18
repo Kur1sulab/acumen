@@ -104,6 +104,7 @@ README = r"""鉴微 Acumen v{ver} —— Windows 绿色版
 目录说明
 --------
 acumen.bat              启动器，双击这个
+START-HERE.txt          就是你正在读的这份说明
 python\                 内置 Python 3.12.8 运行时（约 25MB），不用管
 vc\                     程序本体
 tests\smoke_bundle.py   自检脚本，怀疑环境有问题时跑它
@@ -210,9 +211,9 @@ def assemble(python_zip: Path, build_dir: Path) -> Path:
     eprint("[4/6] 生成启动器（GBK + CRLF）")
     (stage / "acumen.bat").write_bytes(
         BAT.replace("{ver}", VERSION).replace("\n", "\r\n").encode("gbk"))
-    (stage / "使用说明-先读我.txt").write_bytes(
+    (stage / "START-HERE.txt").write_bytes(
         README.replace("{ver}", VERSION).replace("\n", "\r\n").encode("gbk"))
-    eprint("      acumen.bat / 使用说明-先读我.txt")
+    eprint("      acumen.bat / START-HERE.txt")
 
     eprint("[5/6] 打包")
     out_zip = build_dir / f"{BUNDLE}.zip"
@@ -234,7 +235,7 @@ def assemble(python_zip: Path, build_dir: Path) -> Path:
     with zipfile.ZipFile(out_zip) as z:
         got = set(z.namelist())
         for must in ("acumen.bat", "python/python.exe", "python/python312._pth",
-                     "python/_sqlite3.pyd", "vc/server.py", "tests/smoke_bundle.py"):
+                     "python/_sqlite3.pyd", "vc/server.py", "tests/smoke_bundle.py", "START-HERE.txt"):
             if must not in got:
                 problems.append(f"缺 {must}")
         pth_txt = z.read("python/python312._pth").decode("utf-8")

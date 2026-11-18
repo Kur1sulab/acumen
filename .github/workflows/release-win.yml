@@ -40,8 +40,11 @@ jobs:
       - name: 解压交付物
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force smoke | Out-Null
-          tar -xf dist\acumen-1.1.0-win64.zip -C smoke
+          # 用 Expand-Archive 而不是 tar：前者走 .NET ZipFile，认 zip 的 UTF-8 文件名
+          # 标志位，和用户双击解压是同一套逻辑。Windows 自带的 bsdtar 即使包里标了
+          # UTF-8，遇到非 ASCII 名称仍会报 "empty or unreadable filename" 并以 1 退出
+          # ——所以打包侧的文件名也一并改成纯 ASCII，两头都不赌。
+          Expand-Archive -Path dist\acumen-1.1.0-win64.zip -DestinationPath smoke -Force
           Write-Host "--- 解压结果 ---"
           Get-ChildItem smoke | Select-Object Name, Length | Format-Table -AutoSize
 
