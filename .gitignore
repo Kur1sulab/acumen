@@ -10,3 +10,5 @@ out/
 *.bak-*
 _probe_*
 pr-body-*.md
+build/
+dist/

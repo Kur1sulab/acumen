@@ -1,0 +1,98 @@
+name: Windows 绿色版
+
+# 只在真 Windows 上构建和验证。
+# 为什么不用 ubuntu 交叉组装：结构能拼出来，但 ._pth 路径解析、GBK 控制台、
+# sqlite3.dll 能否加载、bat 能否被 cmd 执行——这四件事只有 Windows 说了算。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  bundle:
+    name: 组装 + 真机冒烟（windows-latest）
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 取官方 embeddable 运行时
+        shell: pwsh
+        run: |
+          $ver = "3.12.8"
+          $url = "https://www.python.org/ftp/python/$ver/python-$ver-embed-amd64.zip"
+          Write-Host "下载 $url"
+          Invoke-WebRequest -Uri $url -OutFile py-embed.zip -UseBasicParsing
+          $len = (Get-Item py-embed.zip).Length
+          Write-Host "大小: $len 字节"
+          if ($len -lt 8000000) { throw "运行时包太小，下载不完整" }
+
+      - name: 组装绿色版
+        run: python tools/build_win_bundle.py --python-zip py-embed.zip --out dist
+
+      - name: 解压交付物
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force smoke | Out-Null
+          tar -xf dist\acumen-1.1.0-win64.zip -C smoke
+          Write-Host "--- 解压结果 ---"
+          Get-ChildItem smoke | Select-Object Name, Length | Format-Table -AutoSize
+
+      - name: 解释器与模块自检
+        shell: pwsh
+        working-directory: smoke
+        run: |
+          Write-Host "--- 包内解释器 ---"
+          .\python\python.exe -c "import sys; print(sys.version); print(sys.executable)"
+          Write-Host "--- 模块导入（验证 ._pth 的 .. 生效）---"
+          .\python\python.exe -c "import vc.server, vc.store, vc.parsers, vc.scans, vc.ingest; print('IMPORT-OK')"
+
+      - name: 端到端冒烟（包内解释器真起服务）
+        shell: pwsh
+        working-directory: smoke
+        run: .\python\python.exe tests\smoke_bundle.py
+
+      - name: 真跑 acumen.bat
+        shell: pwsh
+        working-directory: smoke
+        run: |
+          $p = Start-Process -FilePath "cmd.exe" `
+               -ArgumentList "/c acumen.bat --port 7799 --no-watch" `
+               -PassThru -WindowStyle Hidden
+          $ok = $false
+          for ($i = 0; $i -lt 30; $i++) {
+            Start-Sleep -Milliseconds 800
+            try {
+              $r = Invoke-WebRequest -Uri "http://127.0.0.1:7799/api/health" `
+                   -UseBasicParsing -TimeoutSec 2
+              if ($r.StatusCode -eq 200) {
+                Write-Host "HTTP 200 -> $($r.Content)"
+                $ok = $true
+                break
+              }
+            } catch { }
+          }
+          Get-Process python -ErrorAction SilentlyContinue | Stop-Process -Force
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          if (-not $ok) { throw "acumen.bat 没把服务拉起来 —— 交付物不可用" }
+          Write-Host "OK acumen.bat 在真 Windows 上启动成功"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: acumen-win64
+          path: dist/*.zip
+          if-no-files-found: error
+
+      - name: 附到 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
