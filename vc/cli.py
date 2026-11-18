@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import socket
 import ssl
 import sys
@@ -27,6 +28,7 @@ from typing import Any, Dict, List, Optional
 
 from . import __version__
 from . import paths as kpaths
+from . import report as kreport
 from . import scans as sc
 from . import verify as vfy
 from .ingest import Ingestor
@@ -208,9 +210,15 @@ def _ingest(ctx: Ctx) -> Dict[str, Any]:
     return stats
 
 
-def _mode_args(args: argparse.Namespace) -> List[str]:
-    """验证内核的透传参数（其它模式用不到）。"""
+def _mode_args(args: argparse.Namespace, mode: str = "strike") -> List[str]:
+    """给引擎的透传参数：strike 走验证内核，brute 走爆破。其它模式用不到。"""
     out: List[str] = []
+    if mode == "brute":
+        if getattr(args, "ports", ""):
+            out += ["-p", args.ports]
+        if getattr(args, "service", ""):
+            out += ["--service", args.service]
+        return out
     if getattr(args, "ports", ""):
         out += ["--ports", args.ports]
     if getattr(args, "intensity", ""):
@@ -273,9 +281,12 @@ def cmd_status(ctx: Ctx, args: argparse.Namespace) -> int:
 
 # ---------------------------------------------------------------- scan
 
+REPORT_MODES = ("strike", "brute")
+
+
 def cmd_scan(ctx: Ctx, args: argparse.Namespace) -> int:
     mode = args.mode
-    mgr = ctx.manager(mode_args=_mode_args(args) if mode == "strike" else None)
+    mgr = ctx.manager(mode_args=_mode_args(args, mode) if mode in REPORT_MODES else None)
     if not mgr.engine:
         print(_c(sc.ENGINE_HINT, "31"), file=sys.stderr)
         return 2
@@ -304,11 +315,38 @@ def cmd_scan(ctx: Ctx, args: argparse.Namespace) -> int:
     print(f"  引擎　{mgr.engine}")
     print()
 
+    t0 = time.time()
+    started = time.strftime("%Y-%m-%d %H:%M:%S")
     res = mgr.start(mode, targets, parallel=args.parallel, timeout=args.timeout)
     _run_job_loop(mgr, res["job_id"])
-    _ingest(ctx)
+    stats = _ingest(ctx)
     _show_new(ctx, before)
+
+    if not getattr(args, "no_report", False):
+        _auto_report(ctx, before, mode=mode, targets=targets, engine=mgr.engine,
+                     started=started, elapsed=time.time() - t0, stats=stats)
     return 0
+
+
+def _auto_report(ctx: Ctx, before: int, *, mode: str, targets: List[str],
+                 engine: str = "", started: str = "", elapsed: float = 0.0,
+                 stats: Optional[Dict[str, Any]] = None) -> str:
+    """扫完立刻落一份报告：这次扫了什么、每条凭什么算、怎么复现。"""
+    rows = [dict(r) for r in ctx.store.conn.execute(
+        "SELECT * FROM findings WHERE id > ? ORDER BY sev_rank DESC, id", (before,)).fetchall()]
+    notes = [
+        f"模式 `{mode}`：{sc.MODES.get(mode, {}).get('hint', '')}",
+        f"目标 {len(targets)} 个：{', '.join(targets)}",
+        f"引擎 `{engine or '未指定'}`",
+        "全部请求只发往目标本身（断网/内网可用，不访问任何第三方服务）",
+    ]
+    text = kreport.render(rows, target=", ".join(targets), mode=mode, engine=engine,
+                          db=ctx.db, started=started, elapsed=elapsed, stats=stats, notes=notes)
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", targets[0] if targets else "scan")[:50]
+    path = kreport.write(text, os.path.expanduser("~/.kara/reports"),
+                         f"{safe}-{mode}-{time.strftime('%Y%m%d-%H%M%S')}.md")
+    print(f"{_c('[kara]', '36')} 报告：{_c(path, '36')}（{len(rows)} 条，含判据/证据/复现）")
+    return path
 
 
 # ---------------------------------------------------------------- list
@@ -334,7 +372,9 @@ def cmd_list(ctx: Ctx, args: argparse.Namespace) -> int:
             # 带 BOM：Windows Excel 双击不乱码
             data = ctx.store.export_csv(sev=args.sev, status=args.status, q=args.q).encode("utf-8-sig")
         else:
-            data = ctx.store.export_md(sev=args.sev, status=args.status, q=args.q).encode("utf-8")
+            rows = ctx.store.findings(sev=args.sev, status=args.status, q=args.q, limit=10000)["rows"]
+            data = kreport.render(rows, title="空境 Kara 漏洞清单", db=ctx.db,
+                                  notes=["按当前筛选条件导出的清单（与自动报告同一渲染器）"]).encode("utf-8")
         with open(out, "wb") as fh:
             fh.write(data)
         print(f"已写 {out}（{len(data)} 字节）")
@@ -525,7 +565,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-m", "--mode", default="all", choices=list(sc.MODES), help="扫描模式")
     p.add_argument("--scheme", default="auto", choices=["auto", "http", "https", "raw"],
                    help="url 类模式的协议：auto 先握手判定（默认）")
-    p.add_argument("--ports", default="", help="仅 strike：top100 / top1000 / full / 80,443")
+    p.add_argument("--ports", default="", help="strike：top100/full/80,443；brute：22,3306,6379")
+    p.add_argument("--service", default="", help="仅 brute：ftp/mysql/postgres/redis/telnet/http-basic")
+    p.add_argument("--no-report", action="store_true", help="扫完不自动生成 Markdown 报告")
     p.add_argument("--intensity", default="", choices=["", "low", "normal", "high"],
                    help="仅 strike：强度档位")
     p.add_argument("--allow-public", action="store_true", help="仅 strike：允许公网目标")

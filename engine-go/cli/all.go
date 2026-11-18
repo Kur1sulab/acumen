@@ -14,12 +14,9 @@ import (
 	"fmt"
 
 	"github.com/Kur1sulab/kara/engine-go/apiunauth"
-	"github.com/Kur1sulab/kara/engine-go/asset"
 	"github.com/Kur1sulab/kara/engine-go/fingerprint"
-	"github.com/Kur1sulab/kara/engine-go/icp"
 	"github.com/Kur1sulab/kara/engine-go/paths"
 	"github.com/Kur1sulab/kara/engine-go/report"
-	"github.com/Kur1sulab/kara/engine-go/reverseip"
 	"github.com/Kur1sulab/kara/engine-go/subdomain"
 )
 
@@ -53,97 +50,54 @@ func runAll(target string) int {
 	return runAllDomain(target, out)
 }
 
-// runAllIP：yata.py:126-155 —— 反查域名 → 逐个 ICP → 指纹 → API → 端口/JS。
+// runAllIP：内网 IP 目标 —— 端口 → 指纹 → 路径 → API。
+//
+// 老版本这里是「IP 反查域名 → ICP 备案」，两个都要连公网服务（hackertarget / apihz），
+// 断网环境里第一步就卡死。现在只做目标身上能直接看到的事。
 func runAllIP(target, out string) int {
-	var doms []string
-	// reverse 是 fatal 步骤：拿不到反查结果整个流水线没有意义，与 Python 一致。
-	var revErr error
-	if err := step("reverse", true, func() error {
-		doms = reverseip.RunReverse(target, out)
-		return nil
-	}); err != nil {
-		revErr = err
-	}
-	if revErr != nil {
-		fmt.Printf("[!] reverse: %v\n", revErr)
-		return 1
-	}
+	_ = step("portscan", false, func() error { return runPortStep(target, out) })
 
-	// 备案查询最多查 5 个，避免限频；单条失败只打印不影响主流程（yata.py:131-137）。
-	_ = step("icp", false, func() error {
-		for i, d := range doms {
-			if i >= 5 {
-				break
-			}
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						fmt.Printf("[!] %s 备案查询失败: %v\n", d, r)
-					}
-				}()
-				icp.RunICP(d, out)
-			}()
-		}
-		return nil
-	})
-
-	// 裸 IP 常被按域名路由的站点返回 404，优先用反查出的域名探测（yata.py:139-143）。
-	host := target
-	if len(doms) > 0 {
-		host = doms[0]
-		fmt.Printf("[*] 用反查域名 %s 作为探测入口（裸 IP %s 直连多为 404/默认页）\n", host, target)
-	}
-	base := PickBase(host)
+	base := PickBase(target)
 	fmt.Printf("[*] 目标站点探测 base = %s\n", base)
 
-	if err := step("fingerprint", true, func() error {
+	_ = step("fingerprint", false, func() error {
 		fingerprint.RunFingerprint(base, out)
 		return nil
-	}); err != nil {
-		fmt.Printf("[!] fingerprint: %v\n", err)
-		return 1
-	}
-	if err := step("api", true, func() error {
+	})
+	_ = step("paths", false, func() error {
+		_, err := paths.RunPaths(base, out)
+		return err
+	})
+	_ = step("api", false, func() error {
 		_, err := apiunauth.RunAPI(base, out, false)
 		return err
-	}); err != nil {
-		fmt.Printf("[!] api: %v\n", err)
-		return 1
-	}
-
-	// 第二轮升级：端口扫描 + JS 情报（失败只警告，不阻断主流程；yata.py:150-154）。
-	_ = step("portscan", false, func() error { return runPortStep(target, out) })
+	})
 	_ = step("jsintel", false, func() error { return runJSStep(base, out) })
+	_ = step("baseline", false, func() error {
+		return runBaselineStep(base, target, out)
+	})
 
 	return finishAll(out, target)
 }
 
-// runAllDomain：yata.py:156-173 —— 子域 → 存活 → 资产 → ICP → 指纹 → 路径 → API → JS/端口。
+// runAllDomain：域名目标 —— 本地 DNS 子域爆破 → 验活 → 指纹 → 路径 → API → JS → 端口 → 基线。
 func runAllDomain(target, out string) int {
 	if err := step("subdomain", true, func() error {
-		_, err := subdomain.Run(target, out)
-		return err
+		res, err := subdomain.RunOptions(nil, target, out, subdomain.Options{})
+		if err != nil {
+			return err
+		}
+		fmt.Printf("[*] 本地 DNS 爆破：字典 %d 条，命中 %d 个子域（无泛解析: %v）\n",
+			res.Words, len(res.Found), !res.Wildcard)
+		return nil
 	}); err != nil {
 		fmt.Printf("[!] subdomain: %v\n", err)
 		return 1
 	}
 
-	// 审计补充：证书日志含大量失效域名，必须验证存活（yata.py:162）。
-	_ = step("verify", true, func() error {
+	// 命中后验证存活（DNS 已通过，这里补 HTTP 探活，走的是目标自己）
+	_ = step("verify", false, func() error {
 		subdomain.RunVerify(out, 8, true)
-		return nil
-	})
-
-	if err := step("asset", true, func() error {
-		asset.RunAsset(target, out)
-		return nil
-	}); err != nil {
-		fmt.Printf("[!] asset: %v\n", err)
-		return 1
-	}
-
-	_ = step("icp", false, func() error {
-		icp.RunICP(target, out)
 		return nil
 	})
 
@@ -172,9 +126,10 @@ func runAllDomain(target, out string) int {
 		return 1
 	}
 
-	// 第二轮升级：JS 情报 + 端口扫描（失败只警告，不阻断主流程；yata.py:169-173）。
 	_ = step("jsintel", false, func() error { return runJSStep(base, out) })
 	_ = step("portscan", false, func() error { return runPortStep(target, out) })
+	_ = step("baseline", false, func() error { return runBaselineStep(base, target, out) })
+	_ = step("cve", false, func() error { return runCVEStep(base, out) })
 
 	return finishAll(out, target)
 }

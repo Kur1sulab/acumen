@@ -1,0 +1,13 @@
+id: spring-actuator-env
+info:
+  name: Spring Boot Actuator /env 未授权（配置泄露）
+  severity: high
+requests:
+  - method: GET
+    path: /actuator/env
+    matchers:
+      - type: status
+        status: [200]
+      - type: contains
+        words: ["propertySources", "activeProfiles"]
+    condition: and

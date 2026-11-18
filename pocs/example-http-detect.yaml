@@ -1,0 +1,10 @@
+id: example-admin-detect
+info:
+  name: 管理后台存在性探测（离线示例）
+  severity: info
+requests:
+  - method: GET
+    path: /admin
+    matchers:
+      - type: status
+        status: [200, 401, 403]

@@ -3,8 +3,9 @@
 //
 //	yata baseline -d <domain> [-u <url>] [--checks secheaders,webfiles,...]
 //
-// 8 个检查：secheaders(§5.1) webfiles(§5.2) mailsec(§5.3) archives(§5.4)
-// sslchain(§5.5) dnsrec(§5.6) whois(§5.7) geoasn(§5.8)。
+// 只剩 3 项**纯打目标**的检查：secheaders / webfiles / sslchain。
+// archives / whois / geoasn / dnsrec 已删——它们要连 web.archive.org / rdap.org /
+// get.geojs.io / dns.google，断网环境里必然超时，属于「看着专业、现场全挂」的功能。
 //
 // 命名澄清：本包与 netutil.Baseline（软 404 catch-all 探针，netutil/baseline.go）
 // 是两个概念——前者是「暴露面体检基线」，后者是「软 404 响应基线」。本包内对
@@ -37,19 +38,14 @@ import (
 const (
 	CheckSecHeaders = "secheaders"
 	CheckWebfiles   = "webfiles"
-	CheckMailsec    = "mailsec"
-	CheckArchives   = "archives"
+CheckArchives   = "archives"
 	CheckSSLChain   = "sslchain"
-	CheckDNSRec     = "dnsrec"
-	CheckWhois      = "whois"
+CheckWhois      = "whois"
 	CheckGeoASN     = "geoasn"
 )
 
 // checksOrder 聚合执行顺序（报告 §5.1-5.8 编号序）。
-var checksOrder = []string{
-	CheckSecHeaders, CheckWebfiles, CheckMailsec, CheckArchives,
-	CheckSSLChain, CheckDNSRec, CheckWhois, CheckGeoASN,
-}
+var checksOrder = []string{CheckSecHeaders, CheckWebfiles, CheckSSLChain}
 
 // checkAliases --checks 接受的报告原文写法别名。
 var checkAliases = map[string]string{
@@ -61,12 +57,7 @@ var checkAliases = map[string]string{
 var CheckLabels = map[string]string{
 	CheckSecHeaders: "安全响应头",
 	CheckWebfiles:   "网站文件",
-	CheckMailsec:    "邮件安全",
-	CheckArchives:   "历史归档",
 	CheckSSLChain:   "TLS 证书链",
-	CheckDNSRec:     "DNS 记录",
-	CheckWhois:      "WHOIS 注册信息",
-	CheckGeoASN:     "IP 归属 / ASN",
 }
 
 // ErrUnknownCheck --checks 含未知检查名（CLI exit 2）。
@@ -132,12 +123,7 @@ type Options struct {
 var checkFuncs = map[string]func(Options) Result{
 	CheckSecHeaders: RunSecHeaders,
 	CheckWebfiles:   RunWebfiles,
-	CheckMailsec:    RunMailsec,
-	CheckArchives:   RunArchives,
 	CheckSSLChain:   RunSSLChain,
-	CheckDNSRec:     RunDNSRec,
-	CheckWhois:      RunWhois,
-	CheckGeoASN:     RunGeoASN,
 }
 
 // Run 聚合器：串行跑选中检查（§5.9），每检查独立超时、总预算封顶；

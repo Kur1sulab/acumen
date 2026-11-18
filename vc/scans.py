@@ -44,7 +44,7 @@ MODES = {
     },
     "api": {
         "label": "API 未授权", "sub": "api", "flag": "-u", "kind": "url", "expect": 1,
-        "hint": "27 个候选端点，软 404 基线过滤 + 命中取证",
+        "hint": "28 个候选端点，软 404 基线过滤 + 命中取证",
     },
     "jsintel": {
         "label": "JS 情报", "sub": "jsintel", "flag": "-u", "kind": "url", "expect": 1,
@@ -60,11 +60,19 @@ MODES = {
     },
     "subdomain": {
         "label": "子域枚举", "sub": "subdomain", "flag": "-d", "kind": "domain", "expect": 1,
-        "hint": "证书日志枚举子域（crt.sh → certspotter 兜底）",
+        "hint": "本地 DNS 字典爆破（内置约 4.8k 条，泛解析比对，可指定内网 DNS）",
     },
     "strike": {
         "label": "深度验证", "sub": "strike", "flag": "-t", "kind": "any", "expect": 1,
         "hint": "内建验证内核：端口/服务真登/未授权/注入/敏感路径，判定到 L1/L2（真发请求）",
+    },
+    "brute": {
+        "label": "弱口令验证", "sub": "brute", "flag": "-t", "kind": "any", "expect": 1,
+        "hint": "ftp/mysql/postgres/redis/telnet/http-basic 协议握手验证，命中即停、识别锁定",
+    },
+    "cve": {
+        "label": "离线 CVE 匹配", "sub": "cve", "flag": "-u", "kind": "url", "expect": 1,
+        "hint": "从响应抽取产品与版本，比对内置受影响区间（L1：可能受影响，需验证）",
     },
 }
 

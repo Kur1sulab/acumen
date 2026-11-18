@@ -1,0 +1,12 @@
+id: shiro-rememberme-present
+info:
+  name: Shiro rememberMe 特征存在（反序列化前置条件）
+  severity: info
+requests:
+  - method: GET
+    path: /
+    headers:
+      Cookie: rememberMe=deleteMe
+    matchers:
+      - type: contains
+        words: ["rememberMe=deleteMe"]

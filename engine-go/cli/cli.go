@@ -10,39 +10,39 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
 	"github.com/Kur1sulab/kara/engine-go/apiunauth"
-	"github.com/Kur1sulab/kara/engine-go/asset"
 	"github.com/Kur1sulab/kara/engine-go/baseline"
+	"github.com/Kur1sulab/kara/engine-go/brute"
+	"github.com/Kur1sulab/kara/engine-go/cve"
 	"github.com/Kur1sulab/kara/engine-go/fingerprint"
-	"github.com/Kur1sulab/kara/engine-go/icp"
 	"github.com/Kur1sulab/kara/engine-go/netutil"
 	"github.com/Kur1sulab/kara/engine-go/patchdiff"
 	"github.com/Kur1sulab/kara/engine-go/paths"
 	"github.com/Kur1sulab/kara/engine-go/poc"
 	"github.com/Kur1sulab/kara/engine-go/report"
-	"github.com/Kur1sulab/kara/engine-go/reverseip"
 	"github.com/Kur1sulab/kara/engine-go/subdomain"
 )
 
-const helpText = `sweep — 空境 Kara 的扫描内核（Go 单文件，仅限授权测试）
+const helpText = `sweep — 空境 Kara 的扫描内核（Go 单文件；断网/内网可用，零外联）
 
 用法（DOMAIN 或 IP 都吃，工具自动识别）:
   sweep all -t example.com             # 一键全流程（IP/域名自动分支，10 步）
-  sweep subdomain -d example.com [--verify]
+  sweep subdomain -d example.com [--verify] [--resolver 10.0.0.2:53] [--words file]
   sweep verify -d example.com [-w 8]
-  sweep asset -d example.com           # 资产测绘（key 走 FOFA_EMAIL/FOFA_KEY、HUNTER_KEY）
-  sweep reverse -i 203.0.113.7         # IP 反查域名
-  sweep icp -d example.com             # ICP 备案（APIHZ_ID/APIHZ_KEY 可覆盖）
   sweep api -u https://example.com     # API 文档暴露/未授权（含取证模式）
   sweep jsintel -u https://example.com # 外链 JS 情报（≤6 并发/≤2MB，只 GET）
   sweep portscan -t 203.0.113.7        # 端口扫描（常用端口表，并发 ≤32）
+  sweep brute -t 10.0.0.5 [-p 22,3306,6379] [--service redis] [--users u.txt] [--passes p.txt]
+                                         # 内网弱口令验证（ftp/mysql/postgres/redis/telnet/http-basic）
+  sweep cve -u http://10.0.0.5         # 离线 CVE 匹配（版本指纹 → 本地规则库，L1）
   sweep fingerprint -u https://example.com
   sweep paths -u https://example.com   # 敏感路径探测（软 404 基线过滤）
-  sweep baseline -d example.com [--checks secheaders,webfiles]  # 暴露面基线 8 检查
+  sweep baseline -d example.com [--checks secheaders,webfiles,sslchain]  # 暴露面基线 3 检查（只打目标）
   sweep strike -t http://example.com [--intensity normal] [--ports top100]  # 深度验证（真发请求）
   sweep poc -t https://example.com -p pocs/example.yaml  # YAML POC 引擎
   sweep patchdiff -r /path/to/repo [--commit SHA|--range A..B] [--limit N] [--emit-rule f.yaml]
@@ -73,11 +73,13 @@ func printVersion() {
 // 一一对应；llm 槽位已随终修轮公开面清理删除（产品铁律：纯本地无 AI——
 // 原占位「llm 已弃用」提示一并退役，输 unknown 走 argparse 同款 exit 2）。
 var knownCmds = map[string]bool{
-	"all": true, "subdomain": true, "verify": true, "asset": true, "reverse": true,
-	"icp": true, "api": true, "fingerprint": true, "paths": true, "jsintel": true,
+	"all": true, "subdomain": true, "verify": true,
+	"api": true, "fingerprint": true, "paths": true, "jsintel": true,
 	"portscan": true, "poc": true, "patchdiff": true, "report": true,
 	"baseline": true, // 域名暴露面基线（report §5.9；桌面第二子进程，非 Python yata.py 对齐项）
 	"strike": true,   // 深度验证（内建 litmus 内核，非只读模式的延伸）
+	"brute":  true,   // 弱口令验证（协议握手，命中即停）
+	"cve":    true,   // 离线 CVE 版本匹配
 	"version":  true, // 版本自省（Go 侧独有，Python yata.py 无对应子命令）
 }
 
@@ -143,32 +145,57 @@ func Run(args []string) int {
 
 func dispatch(cmd string, rest []string) int {
 	switch cmd {
-	case "subdomain":
+		case "subdomain": // 本地 DNS 字典爆破（断网可用；不查任何证书日志服务）
 		fs := newFlagSet()
-		domain := fs.String("d", "", "")
-		domainAlias := fs.String("domain", "", "")
-		verify := fs.Bool("verify", false, "枚举后立即做存活验证（DNS + HTTP）")
-		if c := parseOrUsage(fs, rest, cmd, "subdomain -d <domain> [--verify]"); c != -1 {
+		d := fs.String("d", "", "")
+		dAlias := fs.String("domain", "", "")
+		verify := fs.Bool("verify", false, "命中后做一次 HTTP 探活")
+		workers := fs.Int("w", subdomain.DefaultWorkers, "并发查询数")
+		resolver := fs.String("resolver", "", "内网 DNS，如 10.0.0.2:53（空 = 系统解析器）")
+		wordsFile := fs.String("words", "", "自定义字典文件（一行一个标签；空 = 内置约 4.8k 条）")
+		usage := "subdomain -d <domain> [--verify] [--resolver ip:53] [--words file] [-w N]"
+		if c := parseOrUsage(fs, rest, cmd, usage); c != -1 {
 			return c
 		}
-		d := pickAliasLastWins(rest, map[string]*string{"-d": domain, "--domain": domainAlias})
-		if d == "" {
-			return missingArgs(cmd, "subdomain -d <domain> [--verify]")
+		domain := pickAliasLastWins(rest, map[string]*string{"-d": d, "--domain": dAlias})
+		if domain == "" {
+			return missingArgs(cmd, usage)
 		}
-		out, err := MakeOutdir(d)
+		if bad, why := invalidDomainShape(domain); bad {
+			fmt.Printf("[!] 非法域名（%s）: %q\n", why, domain)
+			return 2
+		}
+		opt := subdomain.Options{Workers: *workers, Resolver: *resolver}
+		if path := strings.TrimSpace(*wordsFile); path != "" {
+			b, err := os.ReadFile(path)
+			if err != nil {
+				fmt.Printf("[!] --words 读取失败: %v\n", err)
+				return 2
+			}
+			for _, ln := range strings.Split(string(b), "\n") {
+				if w := strings.TrimSpace(ln); w != "" {
+					opt.Words = append(opt.Words, w)
+				}
+			}
+		}
+		out, err := MakeOutdir(domain)
 		if err != nil {
 			fmt.Printf("[!] 输出目录创建失败: %v\n", err)
-			return 1 // 对齐 Python：os.makedirs 抛 OSError 未捕获 → exit 1
+			return 1
 		}
-		if _, err := subdomain.Run(d, out); err != nil {
-			return 1 // fix3：写盘失败 → fail 事件 + exit 1（对齐 Python safe_write 抛错）
+		res, err := subdomain.RunOptions(nil, domain, out, opt)
+		if err != nil {
+			fmt.Printf("[!] subdomain: %v\n", err)
+			return 1
 		}
-		if *verify {
+		fmt.Printf("[+] 子域枚举完成：字典 %d 条 / 命中 %d 个 / 泛解析 %v -> %s\n",
+			res.Words, len(res.Found), res.Wildcard, out+"/subdomains.json")
+		if *verify && len(res.Found) > 0 {
 			subdomain.RunVerify(out, 8, true)
 		}
 		return 0
 
-	case "verify":
+		case "verify":
 		fs := newFlagSet()
 		domain := fs.String("d", "", "")
 		domainAlias := fs.String("domain", "", "")
@@ -206,76 +233,6 @@ func dispatch(cmd string, rest []string) int {
 			return 1
 		}
 		fingerprint.RunFingerprint(url, out)
-		return 0
-
-	case "asset": // yata.py:177-178：asset -d/--domain
-		fs := newFlagSet()
-		domain := fs.String("d", "", "")
-		domainAlias := fs.String("domain", "", "")
-		if c := parseOrUsage(fs, rest, cmd, "asset -d <domain>"); c != -1 {
-			return c
-		}
-		d := pickAliasLastWins(rest, map[string]*string{"-d": domain, "--domain": domainAlias})
-		if d == "" {
-			return missingArgs(cmd, "asset -d <domain>")
-		}
-		out, err := MakeOutdir(d)
-		if err != nil {
-			fmt.Printf("[!] 输出目录创建失败: %v\n", err)
-			return 1
-		}
-		asset.RunAsset(d, out)
-		return 0
-
-	case "reverse": // yata.py:179-180：reverse -i/--ip
-		fs := newFlagSet()
-		ip := fs.String("i", "", "")
-		ipAlias := fs.String("ip", "", "")
-		if c := parseOrUsage(fs, rest, cmd, "reverse -i <ip>"); c != -1 {
-			return c
-		}
-		target := pickAliasLastWins(rest, map[string]*string{"-i": ip, "--ip": ipAlias})
-		if target == "" {
-			return missingArgs(cmd, "reverse -i <ip>")
-		}
-		// fix2 P3：严格 IP 校验——`reverse -i '8.8.8.8&x=1'` 这类注入形态参数
-		// 在入口拒绝（对抗实测曾照单全收拼进数据源 URL）。Go 侧 fail-closed，
-		// Python 侧维持原行为，差异记入 README 已知微差。
-		if net.ParseIP(target) == nil {
-			fmt.Printf("[!] 非法 IP: %q（reverse -i 需要合法 IPv4/IPv6 地址）\n", target)
-			return 2
-		}
-		out, err := MakeOutdir(target)
-		if err != nil {
-			fmt.Printf("[!] 输出目录创建失败: %v\n", err)
-			return 1
-		}
-		reverseip.RunReverse(target, out)
-		return 0
-
-	case "icp": // yata.py:182-183：icp -d/--domain
-		fs := newFlagSet()
-		domain := fs.String("d", "", "")
-		domainAlias := fs.String("domain", "", "")
-		if c := parseOrUsage(fs, rest, cmd, "icp -d <domain>"); c != -1 {
-			return c
-		}
-		d := pickAliasLastWins(rest, map[string]*string{"-d": domain, "--domain": domainAlias})
-		if d == "" {
-			return missingArgs(cmd, "icp -d <domain>")
-		}
-		// fix2 P3：域名形状校验（与 subdomain 入口污点闸同规则），注入/路径
-		// 形态在入口拒绝，不进任何第三方查询。
-		if bad, why := invalidDomainShape(d); bad {
-			fmt.Printf("[!] 非法域名（%s）: %q\n", why, d)
-			return 2
-		}
-		out, err := MakeOutdir(d)
-		if err != nil {
-			fmt.Printf("[!] 输出目录创建失败: %v\n", err)
-			return 1
-		}
-		icp.RunICP(d, out)
 		return 0
 
 	case "api": // yata.py:185-186：api -u/--url（含取证模式）
@@ -334,6 +291,97 @@ func dispatch(cmd string, rest []string) int {
 
 	case "strike": // 深度验证：内建 litmus 内核，产物 out/<target>/strike/ 由 Kara 解析入账
 		return runStrike(rest, cmd)
+
+	case "brute": // 内网弱口令验证（断网可用；命中即停，有额度、识别锁定）
+		fs := newFlagSet()
+		target := fs.String("t", "", "")
+		targetAlias := fs.String("target", "", "")
+		ports := fs.String("p", "", "端口，如 22,3306,6379（空 = 按 --service 的默认端口）")
+		service := fs.String("service", "", "ftp/mysql/postgres/redis/telnet/http-basic（空 = 自动识别）")
+		usersFile := fs.String("users", "", "用户名文件（一行一个；空 = 内置表）")
+		passesFile := fs.String("passes", "", "口令文件（一行一个；空 = 内置弱口令表）")
+		maxAttempts := fs.Int("max", 20, "最大尝试次数（命中即停）")
+		to := fs.Int("timeout", 4, "单次握手超时秒数")
+		usage := "brute -t <host> [-p 22,3306] [--service redis] [--users u.txt] [--passes p.txt] [--max 20]"
+		if c := parseOrUsage(fs, rest, cmd, usage); c != -1 {
+			return c
+		}
+		hostT := pickAliasLastWins(rest, map[string]*string{"-t": target, "--target": targetAlias})
+		if hostT == "" {
+			return missingArgs(cmd, usage)
+		}
+		host, portList := hostAndPorts(hostT, *ports, *service)
+		if len(portList) == 0 {
+			fmt.Printf("[!] 没有可爆破的端口（用 -p 指定，或 --service 给默认端口）\n")
+			return 2
+		}
+		opt := brute.Options{Service: *service, MaxAttempts: *maxAttempts,
+			Timeout: time.Duration(*to) * time.Second,
+			Log:     func(f string, a ...any) { fmt.Printf(f+"\n", a...) }}
+		if p := strings.TrimSpace(*usersFile); p != "" {
+			opt.Users = readListFile(p)
+		}
+		if p := strings.TrimSpace(*passesFile); p != "" {
+			opt.Passes = readListFile(p)
+		}
+		out, err := MakeOutdir(hostT)
+		if err != nil {
+			fmt.Printf("[!] 输出目录创建失败: %v\n", err)
+			return 1
+		}
+		var results []brute.Result
+		for _, prt := range portList {
+			r := brute.Run(nil, host, prt, opt)
+			results = append(results, r)
+			if len(r.Found) > 0 {
+				for _, h := range r.Found {
+					fmt.Printf("[+] 弱口令 %s://%s:%d %s/%s（%s）\n", h.Service, h.Host, h.Port, h.User, h.Pass, h.Note)
+				}
+			} else if r.Skipped != "" {
+				fmt.Printf("[*] %s:%d 跳过：%s\n", host, prt, r.Skipped)
+			}
+		}
+		if err := writeJSON(filepath.Join(out, "brute.json"), results); err != nil {
+			fmt.Printf("[!] 写 brute.json 失败: %v\n", err)
+			return 1
+		}
+		fmt.Printf("[+] 爆破完成 -> %s\n", filepath.Join(out, "brute.json"))
+		return 0
+
+	case "cve": // 离线 CVE 匹配：版本指纹 → 内置规则库（L1：只说明可能受影响）
+		fs := newFlagSet()
+		u := fs.String("u", "", "")
+		uAlias := fs.String("url", "", "")
+		usage := "cve -u <url>"
+		if c := parseOrUsage(fs, rest, cmd, usage); c != -1 {
+			return c
+		}
+		base := pickAliasLastWins(rest, map[string]*string{"-u": u, "--url": uAlias})
+		if base == "" {
+			return missingArgs(cmd, usage)
+		}
+		out, err := MakeOutdir(base)
+		if err != nil {
+			fmt.Printf("[!] 输出目录创建失败: %v\n", err)
+			return 1
+		}
+		res, err := cve.Run(base)
+		if err != nil {
+			fmt.Printf("[!] cve: %v\n", err)
+			return 1
+		}
+		p, err := cve.Write(out, res)
+		if err != nil {
+			fmt.Printf("[!] 写 cve.json 失败: %v\n", err)
+			return 1
+		}
+		fmt.Printf("[*] 识别产品 %d 个，版本区间命中 %d 条（L1：可能受影响，需验证）\n",
+			len(res.Products), len(res.Matches))
+		for _, m := range res.Matches {
+			fmt.Printf("    [%s] %s  %s %s  ← %s\n", m.Severity, m.ID, m.Product, m.Version, m.Evidence)
+		}
+		fmt.Printf("[+] 结果 -> %s\n", p)
+		return 0
 
 	case "poc": // yata.py:198-199：poc -t/--target -p/--poc
 		fs := newFlagSet()

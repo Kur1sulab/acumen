@@ -1,264 +1,292 @@
-// Package subdomain：子域枚举 + 存活验证，移植 src/modules/subdomain.py。
-// 通道链：OneForAll（主，可选）→ subfinder（Go 侧可选补充，存在才用）→
-// crt.sh → certspotter；数据源类逻辑（crt.sh/certspotter）是引擎自身逻辑，
-// 用 Go 原生 HTTP 实现。测试通过包级 URL 变量注入 httptest stub，零外网。
+// Package subdomain：子域枚举 —— 纯本地 DNS 字典爆破，零外联。
+//
+// 为什么不是证书日志：crt.sh / certspotter 都是公网服务，断网环境（内网、VDI、
+// 只进不出的评测现场）一个包都发不出去，只会挂着等超时，然后让人误以为「没有子域」。
+// 内网里唯一可靠的子域来源就是内网自己的 DNS —— 所以这里只做一件事：
+// 拿本地字典逐条查 A/AAAA 记录，命中就记下来。
+//
+// 三条纪律：
+//  1. 只问 DNS，不问第三方 HTTP；解析器默认用系统配置（内网就是内网 DNS），
+//     需要时可用 --resolver 指定内网 DNS 服务器。
+//  2. 先做泛解析探测：随机标签也能解析的域名，逐条比对解析结果集，
+//     命中同一组 IP 的一律丢弃——否则会把「泛解析」写成几千个子域。
+//  3. 产物与老版本兼容：out/subdomains.txt（一行一个 FQDN）+ out/subdomains.json。
 package subdomain
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
-
-	"github.com/Kur1sulab/kara/engine-go/jsonx"
-	"github.com/Kur1sulab/kara/engine-go/netutil"
-	"github.com/Kur1sulab/kara/engine-go/toolrun"
 )
 
-// 可注入的数据源 URL 模板（%s = domain）。测试改指向 httptest stub，绝不真连外网。
-var (
-	CrtShURL       = "https://crt.sh/?q=%%25.%s&output=json"
-	CertspotterURL = "https://api.certspotter.com/v1/issuances?domain=%s&include_subdomains=true&expand=dns_names"
-)
+//go:embed words.txt
+var embeddedWords string
 
-// 可注入的通道钩子（测试桩点）；retrySleep 供失败重试测试免等待。
-// checkBoundary（fix1 审计 low#7）：通道 URL 请求前边界校验，对齐 Python
-// _from_crtsh/_from_certspotter 里请求前的 check_http_url（默认 allow_private=False）。
-// 单测桩打在 127.0.0.1 httptest 上，由 withStubs 注入放行（Python 侧 monkeypatch
-// fetch 故不受影响）。校验失败走「异常降级」分支：0 次重试直接切下一通道，
-// 对齐 Python check_http_url 抛 ValueError 被 run_subdomain 捕获的语义。
-var (
-	retrySleep    = time.Sleep
-	SubfinderFind = toolrun.FindSubfinder
-	SubfinderRun  = func(path, domain string) ([]string, error) { return toolrun.RunSubfinder(path, domain, 0) }
-	checkBoundary = func(rawURL string) (string, error) { return netutil.CheckHTTPURL(rawURL, false) }
-)
+// DefaultWorkers 并发查询数：内网 DNS 通常扛得住，但对老设备留点余量。
+const DefaultWorkers = 32
 
-// FromCrtSh 证书透明度日志查询，对齐 subdomain.py:46-71：
-// 3 次退避重试（sleep 2*i 秒）；彻底失败优雅返回空列表而非抛错；
-// name_value 按行拆分 → 去空白 → 小写 → 去左侧 *. → 后缀过滤 → 排序去重。
-func FromCrtSh(domain string, tries int) []string {
-	return fromCrtShCtx(context.Background(), domain, tries)
+// DefaultTimeout 单次查询超时。
+const DefaultTimeout = 3 * time.Second
+
+// Options 爆破参数。零值 = 内置字典 + 系统解析器。
+type Options struct {
+	Words    []string      // 自定义字典（空 = 内置约 4.8k 条）
+	Workers  int           // 并发（0 = DefaultWorkers）
+	Timeout  time.Duration // 单次超时（0 = DefaultTimeout）
+	Resolver string        // "10.0.0.2:53"；空 = 系统解析器
+	Progress func(done, total int, fqdn string)
 }
 
-// fromCrtShCtx 是 FromCrtSh 的取消变体（第一步「取消能力注入」①）：
-// 请求过 FetchOpt.Ctx 咽喉，重试循环顶部设检查点——取消立即收敛返回
-// （外层 RunContext 检查点据此上抛 ctx.Err()）。旧签名委托本函数，
-// 存量测试（含 retrySleep 桩）零改动。
-func fromCrtShCtx(ctx context.Context, domain string, tries int) []string {
-	if tries <= 0 {
-		tries = 3
-	}
-	url := fmt.Sprintf(CrtShURL, domain)
-	if _, err := checkBoundary(url); err != nil {
-		// 对齐 Python：check_http_url 抛 ValueError → run_subdomain 打印
-		// 「[!] crt.sh 异常」并 0 次重试直接降级 certspotter（不是 3 次退避重试）。
-		fmt.Printf("[!] crt.sh 异常: %v\n", err)
-		return nil
-	}
-	var data []struct {
-		NameValue string `json:"name_value"`
-	}
-	found := false
-	for i := 1; i <= tries; i++ {
-		if err := ctx.Err(); err != nil { // 取消检查点（第一步①）
-			fmt.Println("[!] crt.sh 已取消，停止重试")
-			return nil
-		}
-		r := netutil.Fetch(url, netutil.FetchOpt{Timeout: 30 * time.Second, Follow: true, Ctx: ctx})
-		if r.OK && r.Status == 200 && r.Body != "" {
-			if err := json.Unmarshal([]byte(r.Body), &data); err != nil {
-				fmt.Printf("[!] crt.sh 第 %d/%d 次响应解析失败: %v\n", i, tries, err)
-			} else {
-				found = true
-				break
-			}
-		} else {
-			reason := r.Err
-			if reason == "" {
-				reason = fmt.Sprintf("%d", r.Status)
-			}
-			fmt.Printf("[!] crt.sh 第 %d/%d 次请求失败: %s\n", i, tries, reason)
-		}
-		if i < tries {
-			retrySleep(time.Duration(2*i) * time.Second)
-		}
-	}
-	if !found {
-		fmt.Println("[!] crt.sh 不可用（重试均失败）。可设置 ONEFORALL_HOME 走 OneForAll，或稍后重试")
-		return nil
-	}
-	return collectNames(len(data), func(i int) []string {
-		return strings.Split(data[i].NameValue, "\n")
-	}, domain)
+// Found 一条命中。
+type Found struct {
+	Name string   `json:"name"`
+	FQDN string   `json:"fqdn"`
+	IPs  []string `json:"ips"`
 }
 
-// FromCertspotter 备用证书源，对齐 subdomain.py:74-89：失败返回 error。
-func FromCertspotter(domain string) ([]string, error) {
-	return fromCertspotterCtx(context.Background(), domain)
+// Result 整轮结果（= subdomains.json 的内容）。
+type Result struct {
+	Domain      string   `json:"domain"`
+	Source      string   `json:"source"`
+	Words       int      `json:"words"`
+	Scanned     int      `json:"scanned"`
+	Wildcard    bool     `json:"wildcard"`
+	WildcardIPs []string `json:"wildcard_ips,omitempty"`
+	Found       []Found  `json:"found"`
+	Elapsed     float64  `json:"elapsed"`
+	Resolver    string   `json:"resolver"`
 }
 
-// fromCertspotterCtx 是 FromCertspotter 的取消变体（第一步①）：
-// 请求过取消咽喉，入口设检查点。
-func fromCertspotterCtx(ctx context.Context, domain string) ([]string, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	url := fmt.Sprintf(CertspotterURL, domain)
-	if _, err := checkBoundary(url); err != nil {
-		// 对齐 Python：check_http_url 抛 ValueError 原样上抛（run_subdomain
-		// 捕获后打印「[!] certspotter 也不可用」），不发起 HTTP 请求。
-		return nil, err
-	}
-	r := netutil.Fetch(url, netutil.FetchOpt{Timeout: 30 * time.Second, Follow: true, Ctx: ctx})
-	if !(r.OK && r.Status == 200 && r.Body != "") {
-		reason := r.Err
-		if reason == "" {
-			reason = fmt.Sprintf("HTTP %d", r.Status)
-		}
-		return nil, fmt.Errorf("%s", reason)
-	}
-	var data []struct {
-		DnsNames []string `json:"dns_names"`
-	}
-	if err := json.Unmarshal([]byte(r.Body), &data); err != nil {
-		return nil, err
-	}
-	return collectNames(len(data), func(i int) []string { return data[i].DnsNames }, domain), nil
-}
-
-// collectNames 共用清洗：strip → lower → 去左侧 .* → 剔控制字符 → endswith(domain)
-// 过滤 → 排序去重。fix1（对抗 INFO）：crt.sh 返回数据实测内嵌控制字符（\x01\x02），
-// 原样进 subdomains.txt 会污染产物与下游解析——剔 <0x20 与 0x7f。剔除时机在
-// strip/lower/lstrip 之后，与 Python 侧同步加的清洗位置一致（保证 parity）。
-func collectNames(n int, get func(int) []string, domain string) []string {
-	suffix := strings.ToLower(domain)
-	seen := map[string]bool{}
-	var subs []string
-	for i := 0; i < n; i++ {
-		for _, raw := range get(i) {
-			name := strings.ToLower(strings.TrimSpace(raw))
-			name = strings.TrimLeft(name, ".*") // Python lstrip("*.")：剥掉左侧所有 . 与 *
-			name = strings.Map(func(r rune) rune {
-				if r < 0x20 || r == 0x7f {
-					return -1
-				}
-				return r
-			}, name)
-			if name == "" || !strings.HasSuffix(name, suffix) || seen[name] {
-				continue
-			}
-			seen[name] = true
-			subs = append(subs, name)
+// Words 内置字典（去重、去空行）。
+func Words() []string {
+	out := make([]string, 0, 5000)
+	for _, ln := range strings.Split(embeddedWords, "\n") {
+		ln = strings.TrimSpace(ln)
+		if ln != "" {
+			out = append(out, ln)
 		}
 	}
-	sort.Strings(subs)
-	return subs
+	return out
 }
 
-// Run 子域枚举主流程，对齐 subdomain.py:92-116 的降级链：
-// OneForAll（主）→ crt.sh → certspotter；Go 侧增强：subfinder 作为合并补充
-// 通道插在链后（存在才用、失败只告警），不改变 Python 原降级链的触发条件
-// （即：OneForAll 无结果时 crt.sh 链照走，subfinder 只做并集补充）。
-// 源名与计数打印对齐，结果去重排序后 SafeWrite 到 subdomains.txt。
+// Run 兼容旧签名：默认参数跑一轮，返回命中的 FQDN 列表。
 func Run(domain, out string) ([]string, error) {
-	return RunContext(context.Background(), domain, out)
+	res, err := RunOptions(context.Background(), domain, out, Options{})
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(res.Found))
+	for _, f := range res.Found {
+		names = append(names, f.FQDN)
+	}
+	return names, nil
 }
 
-// RunContext 是 Run 的取消变体（第一步「取消能力注入」①）：多通道降级链
-// （OneForAll → crt.sh → certspotter → subfinder → 写盘）在每通道之间设
-// 检查点，取消立即收敛返回 ctx.Err()、不落盘；OneForAll 子进程经
-// toolrun.RunOneForAllContext 随 ctx 中止。subfinder 通道保留既有
-// SubfinderRun 注入钩子（存量测试桩零改动），取消经检查点跳过该通道。
-// 旧 Run(...) 委托本函数（Background 即原行为），cli.go 调用点零改动。
-func RunContext(ctx context.Context, domain, out string) ([]string, error) {
+// RunOptions 跑一轮本地 DNS 字典爆破，并把结果写进 out 目录。
+func RunOptions(ctx context.Context, domain, out string, opt Options) (Result, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return Result{}, err
 	}
-	// 入口污点闸（污点门禁可建模的 sanitizer 形态）：CLI/上层传入的 domain
-	// 进入任何通道前做形状白名单——非空、≤253、无路径分隔符/悬浮点组件/
-	// 控制字符。非法输入直接返回空（各通道内的同名拦截为第二道纵深）。
-	if d := strings.TrimSpace(domain); d == "" || len(d) > 253 ||
-		strings.ContainsAny(d, `/\`) || strings.Contains(d, "..") ||
-		strings.ContainsFunc(d, func(r rune) bool { return r <= 0x20 || r == 0x7f }) {
-		fmt.Printf("[!] 非法域名（形状校验未过，全部通道拦截）: %q\n", domain)
-		return nil, nil
+	d := normalizeDomain(domain)
+	if d == "" {
+		return Result{}, fmt.Errorf("非法域名: %q", domain)
 	}
-	seen := map[string]bool{}
-	var subs []string
-	add := func(list []string) {
-		for _, s := range list {
-			if s == "" || seen[s] {
-				continue
-			}
-			seen[s] = true
-			subs = append(subs, s)
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		return Result{}, fmt.Errorf("输出目录不可写: %w", err)
+	}
+
+	words := opt.Words
+	if len(words) == 0 {
+		words = Words()
+	}
+	workers := opt.Workers
+	if workers <= 0 {
+		workers = DefaultWorkers
+	}
+	timeout := opt.Timeout
+	if timeout <= 0 {
+		timeout = DefaultTimeout
+	}
+
+	resolver := net.DefaultResolver
+	if opt.Resolver != "" {
+		resolver = &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+				d := net.Dialer{Timeout: timeout}
+				return d.DialContext(ctx, "udp", opt.Resolver)
+			},
 		}
 	}
 
-	src := ""
-	ofs := toolrun.RunOneForAllContext(ctx, os.Getenv("ONEFORALL_HOME"), domain, out, 0)
-	if len(ofs) > 0 {
-		src = "OneForAll"
-		add(ofs)
-	} else {
-		if err := ctx.Err(); err != nil { // 通道间检查点（第一步①）
-			return nil, err
-		}
-		// 与 Python 一致：OneForAll 无结果时走证书日志降级链
-		if os.Getenv("ONEFORALL_HOME") == "" {
-			fmt.Println("[*] 未设置 ONEFORALL_HOME，降级使用证书日志查询")
-		}
-		src = "crt.sh"
-		add(fromCrtShCtx(ctx, domain, 3))
-		if len(subs) == 0 {
-			if err := ctx.Err(); err != nil { // 通道间检查点（第一步①）
-				return nil, err
+	t0 := time.Now()
+	wildcardIPs := detectWildcard(ctx, resolver, d, timeout)
+	res := Result{
+		Domain: d, Source: "dns-brute", Words: len(words),
+		Wildcard: len(wildcardIPs) > 0, WildcardIPs: wildcardIPs,
+		Resolver: opt.Resolver,
+	}
+	if res.Wildcard {
+		fmt.Printf("[!] 泛解析：*.%s → %s（命中同组 IP 的子域会被丢弃）\n", d, strings.Join(wildcardIPs, ","))
+	}
+
+	type job struct{ name string }
+	jobs := make(chan job)
+	var mu sync.Mutex
+	var found []Found
+	var scanned int
+
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range jobs {
+				if ctx.Err() != nil {
+					return
+				}
+				fqdn := j.name + "." + d
+				ips := lookupIPs(ctx, resolver, fqdn, timeout)
+				mu.Lock()
+				scanned++
+				if len(ips) > 0 && !sameSet(ips, wildcardIPs) {
+					found = append(found, Found{Name: j.name, FQDN: fqdn, IPs: ips})
+				}
+				done := scanned
+				mu.Unlock()
+				if opt.Progress != nil {
+					opt.Progress(done, len(words), fqdn)
+				}
 			}
-			fmt.Println("[*] 尝试备用证书源 certspotter")
-			cs2, err := fromCertspotterCtx(ctx, domain)
-			if err != nil {
-				fmt.Printf("[!] certspotter 也不可用: %v\n", err)
-			} else {
-				src = "certspotter"
-				add(cs2)
-			}
+		}()
+	}
+	for _, w := range words {
+		select {
+		case <-ctx.Done():
+			close(jobs)
+			wg.Wait()
+			return res, ctx.Err()
+		case jobs <- job{name: w}:
 		}
 	}
-	if err := ctx.Err(); err != nil { // subfinder 通道前检查点（第一步①）
-		return nil, err
+	close(jobs)
+	wg.Wait()
+
+	sort.Slice(found, func(i, j int) bool { return found[i].FQDN < found[j].FQDN })
+	res.Found = found
+	res.Scanned = scanned
+	res.Elapsed = time.Since(t0).Seconds()
+	if res.Found == nil {
+		res.Found = []Found{}
 	}
-	// Go 侧增强：subfinder 可选合并补充（存在才用，版本 best-effort 记录）。
-	if p := SubfinderFind(); p != "" {
-		ss, err := SubfinderRun(p, domain)
-		if err != nil {
-			fmt.Printf("[!] subfinder 通道失败: %v\n", err)
-		}
-		if len(ss) > 0 {
-			add(ss)
-			src += "+subfinder"
-		}
+
+	if err := writeArtifacts(out, res); err != nil {
+		return res, err
 	}
-	sort.Strings(subs) // 多源合并后整体排序（Python 单源本就有序）
-	content := strings.Join(subs, "\n")
-	if len(subs) > 0 {
-		content += "\n"
-	}
-	path, err := netutil.SafeWrite(out, "subdomains.txt", content)
-	if err != nil {
-		// fix3（audit medium#4）：上抛 → CLI exit 1 + fail 事件，对齐 Python safe_write 抛 ValueError
-		fmt.Printf("[!] 子域列表写盘失败: %v\n", err)
-		return nil, err
-	}
-	fmt.Printf("[+] 子域枚举完成（%s，%d 个）-> %s\n", src, len(subs), path)
-	return subs, nil
+	return res, nil
 }
 
-// marshalPretty 供 verify.go 共用（ensure_ascii=False + indent=2 语义）。
-func marshalPretty(v any) string { return jsonx.Pretty(v) }
+func writeArtifacts(out string, res Result) error {
+	lines := make([]string, 0, len(res.Found))
+	for _, f := range res.Found {
+		lines = append(lines, f.FQDN)
+	}
+	if err := os.WriteFile(filepath.Join(out, "subdomains.txt"),
+		[]byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		return fmt.Errorf("写 subdomains.txt 失败: %w", err)
+	}
+	b, err := json.MarshalIndent(res, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(out, "subdomains.json"), b, 0o644); err != nil {
+		return fmt.Errorf("写 subdomains.json 失败: %w", err)
+	}
+	return nil
+}
+
+// detectWildcard 随机标签解析：能解析说明域名开了泛解析，记下 IP 集合用于比对。
+func detectWildcard(ctx context.Context, r *net.Resolver, domain string, timeout time.Duration) []string {
+	var union []string
+	for i := 0; i < 2; i++ {
+		label := fmt.Sprintf("kara-wildcard-%d%d", time.Now().UnixNano()%100000, i)
+		for _, ip := range lookupIPs(ctx, r, label+"."+domain, timeout) {
+			union = append(union, ip)
+		}
+	}
+	return uniq(union)
+}
+
+func lookupIPs(ctx context.Context, r *net.Resolver, fqdn string, timeout time.Duration) []string {
+	c, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	addrs, err := r.LookupHost(c, fqdn)
+	if err != nil || len(addrs) == 0 {
+		return nil
+	}
+	return uniq(addrs)
+}
+
+func sameSet(a, b []string) bool {
+	if len(b) == 0 || len(a) == 0 {
+		return false
+	}
+	bs := map[string]bool{}
+	for _, x := range b {
+		bs[x] = true
+	}
+	for _, x := range a {
+		if !bs[x] {
+			return false
+		}
+	}
+	return true
+}
+
+func uniq(in []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func normalizeDomain(domain string) string {
+	d := strings.ToLower(strings.TrimSpace(domain))
+	d = strings.TrimPrefix(d, "http://")
+	d = strings.TrimPrefix(d, "https://")
+	if i := strings.IndexAny(d, "/:"); i >= 0 {
+		d = d[:i]
+	}
+	d = strings.Trim(d, ".")
+	if d == "" || len(d) > 253 || strings.Contains(d, "..") {
+		return ""
+	}
+	return d
+}
+
+// marshalPretty 供 verify.go 复用：带缩进的 JSON（人工看产物时友好）。
+func marshalPretty(v any) string {
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}

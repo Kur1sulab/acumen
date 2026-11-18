@@ -73,16 +73,6 @@ def _is_evidence(obj: Any) -> bool:
             and ("evidence" in obj or "recheck" in obj) and "risk" in obj)
 
 
-_SNIFFERS = (
-    ("sweep_strike", _is_strike),
-    ("sweep_paths", _is_paths),
-    ("sweep_ports", _is_ports),
-    ("sweep_api", _is_api),
-    ("sweep_jsintel", _is_jsintel),
-    ("sweep_baseline", _is_baseline),
-    ("sweep_evidence", _is_evidence),
-    ("sweep_fingerprint", _is_fingerprint),
-)
 
 # 空结果文件的文件名 → 它代表哪个动作跑完了（引擎 0 命中时写空数组）
 _EMPTY_KIND = {
@@ -234,6 +224,101 @@ def parse_strike(obj: Dict[str, Any], host: str) -> ParseResult:
     return ParseResult("sweep_strike", findings, assets, note=note)
 
 
+def _is_brute(obj: Any) -> bool:
+    """brute.json：数组，元素带 host/service/tried/found。"""
+    if not isinstance(obj, list) or not obj:
+        return False
+    first = obj[0]
+    return isinstance(first, dict) and "service" in first and "found" in first and "tried" in first
+
+
+def _brute_repro(h: Dict[str, Any]) -> str:
+    """按协议给出可直接粘贴的复现命令（含凭据，报告内部用）。"""
+    svc = str(h.get("service") or "")
+    host, port = h.get("host") or "", h.get("port") or ""
+    u, pw = h.get("user") or "", h.get("pass") or ""
+    if svc == "redis":
+        return f"redis-cli -h {host} -p {port} -a '{pw}' ping" if pw else \
+               f"redis-cli -h {host} -p {port} ping"
+    if svc == "mysql":
+        return f"mysql -h {host} -P {port} -u{u} -p'{pw}' -e 'select version()'"
+    if svc == "postgres":
+        return f"PGPASSWORD='{pw}' psql -h {host} -p {port} -U {u} -c 'select version()'"
+    if svc == "ftp":
+        return f"curl -s ftp://{u}:'{pw}'@{host}:{port}/"
+    if svc == "http-basic":
+        return f"curl -i -k -u '{u}:{pw}' 'http://{host}:{port}/'"
+    if svc == "telnet":
+        return f"telnet {host} {port}   # 用户 {u} / 口令 {pw}"
+    return f"# {svc} {host}:{port} {u}/{pw}"
+
+
+def parse_brute(obj: List[Any], host: str) -> ParseResult:
+    """弱口令命中入账：凭据本身就是证据，报告里连协议回包摘要一起给。"""
+    findings, assets = [], []
+    for r in obj:
+        if not isinstance(r, dict):
+            continue
+        svc = str(r.get("service") or "")
+        h = str(r.get("host") or host)
+        port = r.get("port")
+        found = [x for x in r.get("found") or [] if isinstance(x, dict)]
+        if found:
+            for hit in found:
+                user = str(hit.get("user") or "")
+                pw = str(hit.get("pass") or "")
+                findings.append(_mk_finding(
+                    asset=h, ip=h, port=port, endpoint=f"{svc}://{h}:{port}",
+                    title=f"弱口令：{svc} {user}/{'（空口令）' if pw == '' else pw}",
+                    sev="critical" if svc in ("redis", "mysql", "postgres") else "high",
+                    source=f"sweep-brute:{svc}",
+                    evidence=_ev(f"{svc} 登录成功", hit.get("note"),
+                                 f"尝试 {r.get('tried')} 次"),
+                    repro=_brute_repro(hit),
+                    raw=json.dumps(hit, ensure_ascii=False)[:800],
+                ))
+        elif r.get("skipped"):
+            # 没测成也要留痕：不写的话会变成「没弱口令」的假结论
+            findings.append(_mk_finding(
+                asset=h, ip=h, port=port, endpoint=f"{svc}://{h}:{port}",
+                title=f"未能验证：{svc}（{r.get('skipped')}）",
+                sev="info", source=f"sweep-brute:{svc}",
+                evidence=_ev(r.get("skipped"), f"尝试 {r.get('tried')} 次"),
+                repro="", raw=json.dumps(r, ensure_ascii=False)[:800],
+            ))
+    note = f"{len(findings)} 条（含未验证项，见 evidence）" if findings else "无弱口令命中"
+    return ParseResult("sweep_brute", findings, assets, note=note)
+
+
+def _is_cve(obj: Any) -> bool:
+    """cve.json：target + products + matches。"""
+    return (isinstance(obj, dict) and "matches" in obj and "products" in obj
+            and isinstance(obj.get("matches"), list))
+
+
+def parse_cve(obj: Dict[str, Any], host: str) -> ParseResult:
+    """版本区间命中：L1，标题里就写清楚「可能受影响」，并给出验证动作。"""
+    findings = []
+    for m in [x for x in obj.get("matches") or [] if isinstance(x, dict)]:
+        target = str(obj.get("target") or "")
+        findings.append(_mk_finding(
+            asset=split_host_port(host)[0] or host,
+            endpoint=target,
+            title=f"{m.get('id')} 可能受影响：{m.get('title')}",
+            sev=str(m.get("severity") or "medium"),
+            source=f"sweep-cve:{m.get('id')}",
+            evidence=_ev(f"{m.get('product')} {m.get('version')}", m.get("evidence"),
+                         "版本区间命中（L1，未验证可利用）"),
+            repro=str(m.get("verify") or ""),
+            cve=str(m.get("id") if str(m.get("id", "")).startswith("CVE-") else ""),
+            raw=json.dumps(m, ensure_ascii=False)[:800],
+        ))
+    prods = [f"{p.get('product')} {p.get('version')}".strip()
+             for p in obj.get("products") or [] if isinstance(p, dict)]
+    note = f"{len(findings)} 条版本命中；识别产品：{', '.join(prods) or '无'}"
+    return ParseResult("sweep_cve", findings, [], note=note)
+
+
 def parse_paths(obj: Dict[str, Any], host: str) -> ParseResult:
     findings, assets = [], []
     alive = [x for x in obj.get("alive") or [] if isinstance(x, dict)]
@@ -251,6 +336,8 @@ def parse_paths(obj: Dict[str, Any], host: str) -> ParseResult:
             source="sweep-paths",
             evidence=_ev(f"HTTP {status}" if status else "", f"{size}B" if size else "",
                          it.get("ctype"), "复验通过" if it.get("verified") else ""),
+            repro=(f"curl -i -k '{endpoint}'" if endpoint.startswith("http") else
+                   f"curl -i -k 'http://{host}{p}'"),
             raw=json.dumps(it, ensure_ascii=False)[:1200],
         ))
     if host:
@@ -291,6 +378,8 @@ def parse_api(obj: Dict[str, Any], host: str) -> ParseResult:
             evidence=_ev(it.get("evidence") or it.get("marker"),
                          f"HTTP {it.get('status')}" if it.get("status") else "",
                          f"{it.get('size')}B" if it.get("size") else ""),
+            repro=(f"curl -i -k '{url}'" if url else
+                   f"curl -i -k 'http://{host}{it.get('path')}'"),
             raw=json.dumps(it, ensure_ascii=False)[:1200],
         ))
     hits = len(findings)
@@ -433,16 +522,6 @@ def parse_evidence(obj: Dict[str, Any], host: str) -> ParseResult:
     return ParseResult("sweep_evidence", [finding], [], note=str(obj.get("name") or ""))
 
 
-_PARSERS = {
-    "sweep_strike": parse_strike,
-    "sweep_paths": parse_paths,
-    "sweep_ports": parse_ports,
-    "sweep_api": parse_api,
-    "sweep_jsintel": parse_jsintel,
-    "sweep_baseline": parse_baseline,
-    "sweep_evidence": parse_evidence,
-    "sweep_fingerprint": parse_fingerprint,
-}
 
 
 def parse(text: str, path: str = "") -> Optional[ParseResult]:
@@ -503,3 +582,33 @@ def parse(text: str, path: str = "") -> Optional[ParseResult]:
         return None
     agg.note = "；".join(dict.fromkeys(notes))[:400]
     return agg
+
+
+# ---------------------------------------------------------------- 注册表
+#
+# 放在文件末尾：嗅探器引用的是下面这些解析函数，定义顺序反了会在 import 阶段就 NameError。
+_SNIFFERS = (
+    ("sweep_strike", _is_strike),
+    ("sweep_cve", _is_cve),
+    ("sweep_brute", _is_brute),
+    ("sweep_paths", _is_paths),
+    ("sweep_ports", _is_ports),
+    ("sweep_api", _is_api),
+    ("sweep_jsintel", _is_jsintel),
+    ("sweep_baseline", _is_baseline),
+    ("sweep_evidence", _is_evidence),
+    ("sweep_fingerprint", _is_fingerprint),
+)
+
+_PARSERS = {
+    "sweep_strike": parse_strike,
+    "sweep_cve": parse_cve,
+    "sweep_brute": parse_brute,
+    "sweep_paths": parse_paths,
+    "sweep_ports": parse_ports,
+    "sweep_api": parse_api,
+    "sweep_jsintel": parse_jsintel,
+    "sweep_baseline": parse_baseline,
+    "sweep_evidence": parse_evidence,
+    "sweep_fingerprint": parse_fingerprint,
+}

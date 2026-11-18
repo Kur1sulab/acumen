@@ -3,6 +3,61 @@
 版本号按 [语义化版本](https://semver.org/lang/zh-CN/)：修 bug 走 patch，加能力走 minor，
 输出格式或数据库结构不兼容才走 major。
 
+## 1.9.0 — 2026-11-18
+
+### 变更 · 回到产品的真实定位：断网 / 内网工具
+
+Kara 的战场是内网、VDI、只能进不能出的现场。上一版里还挂着几个「要连公网服务」的模块，
+在那种环境里必然挂着等超时，然后让人误以为「没有结果」。这一版整层删掉：
+
+| 删掉的东西 | 它原来的外联对象 |
+|---|---|
+| `icp`（备案查询） | cn.apihz.cn |
+| `asset`（资产测绘） | fofa.info / hunter.qianxin.com |
+| `reverse`（IP 反查域名） | api.hackertarget.com |
+| 子域证书日志通道 | crt.sh / certspotter / OneForAll / subfinder |
+| `baseline` 的 archives / whois / geoasn / dnsrec / mailsec | web.archive.org / rdap.org / tranco / geojs.io / ipwho.is / dns.google |
+
+现在整份引擎只剩一种出站：**朝用户给的目标发请求**。CI 里 `tools/check_offline.py` 守着这条。
+
+### 新增 · 断网下真正能用的能力
+
+- **`subdomain` 重写为本地 DNS 字典爆破**：内置约 4.8k 条标签（SecLists top5000 + 内网常见），
+  先探测泛解析并比对解析结果集（否则泛解析域名会被写成几千个子域），支持 `--resolver 10.0.0.2:53`
+  指内网 DNS。不再依赖任何证书日志服务。
+- **`brute` 弱口令验证**：FTP / MySQL / PostgreSQL / Redis / Telnet / HTTP-Basic 六种协议自己实现握手
+  （零第三方依赖）。有额度（默认 20 次/端口）、命中即停、识别「尝试过多/账号锁定」立即停止；
+  没测成的目标会写 `skipped` 原因，不会被当成「没有弱口令」。
+- **`cve` 离线 CVE 匹配**：从响应头/正文抽产品与版本，比对编译进二进制的规则库（24 条：Apache
+  2.4.49/2.4.50、Struts2 S2-045/057、Ghostcat、Spring4Shell、Spring Cloud Gateway、WebLogic
+  14882/2725、Shiro、Nacos、Grafana、Confluence、GitLab、Webmin、Drupal、Zabbix、Solr、ActiveMQ、
+  SaltStack、Log4Shell、ThinkPHP 5.0/5.1）。产出固定 `L1 / version-range`——版本落在区间只说明
+  「可能受影响」，规则里同时给出验证动作。
+- `all` 流水线接入 `cve` 步骤（爆破不入 `all`，避免意外锁账号）。
+
+### 新增 · 扫完自动出的报告带证据与发现过程
+
+`kara scan` 结束自动写 `~/.kara/reports/<目标>-<模式>-<时间>.md`（`--no-report` 可关）：
+
+- **发现方式**：哪个模式、判据链是什么（人话，不是只给个来源标记）
+- **判据**：状态码 / 字节数 / Content-Type / 匹配关键字 / 复验结果
+- **证据**：直接内联引擎落盘的响应片段（优先 `response.snippet.txt`），并列出 `evidence/` 原始文件
+- **复现**：可粘贴命令（curl / redis-cli / psql / mysql / ftp / telnet）
+- **未验证 / 跳过**单独一节，带原因
+
+`kara list --md` 走同一个渲染器。
+
+### 修复
+
+- `cve` 读不到版本号：netutil 落盘的响应头是**小写键**，`hdr["Server"]` 永远空 → 统一归一化。
+- 产物解析注册表放在函数定义之前，`import vc.parsers_sweep` 直接 NameError → 移到文件末尾。
+- 证据文件按端点 slug 定位（以前会把同目标其它端点的证据也列进来）。
+
+### 测试
+
+- Python 129 个（新增 brute / cve 产物解析、报告必须含发现方式/判据/证据/复现、证据内联）；
+- Go：`go test ./...` 全绿（删掉针对已移除模块与 Python 对照的测试；`internal/parity` 保留壳并显式 skip）。
+
 ## 1.8.0 — 2026-11-18
 
 ### 变更 · 收敛成单一 CLI（去掉网页层）
