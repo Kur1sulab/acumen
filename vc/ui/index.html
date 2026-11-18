@@ -77,10 +77,10 @@
       </div>
     </header>
 
-    <div class="page">
+    <div class="page" id="pageRoot" data-view="findings">
       <div class="page-head">
-        <h1>漏洞管理 <span class="code">/VULN</span></h1>
-        <p>查看和管理所有扫描发现的漏洞</p>
+        <h1><span id="pageTitle">漏洞管理</span> <span class="code" id="pageCode">/VULN</span></h1>
+        <p id="pageDesc">查看和管理所有扫描发现的漏洞</p>
       </div>
 
       <!-- 六联统计条 -->
@@ -112,6 +112,7 @@
           <option>已忽略</option>
         </select>
         <span class="grow"></span>
+        <span id="selInfo" class="foot-note"></span>
       </div>
 
       <!-- 筛选面板（默认收起，点「筛选」展开） -->

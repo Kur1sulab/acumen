@@ -89,6 +89,27 @@
     return row ? (Number(row.n) || 0) : 0;
   }
 
+  // 每个视图自己的标题（面包屑 + 页面标题跟着导航走，不然切到资产页还写着「漏洞管理」）
+  const VIEW_META = {
+    findings: ['漏洞管理', '/VULN', '查看和管理所有扫描发现的漏洞'],
+    assets: ['资产管理', '/ASSET', '主机、端口与服务指纹，按风险排序'],
+    scan: ['扫描任务', '/SCAN', '起本机引擎跑任务，产物自动落进收件箱'],
+    files: ['收件箱', '/INBOX', '扫描产物文件与解析状态'],
+    log: ['摄入日志', '/LOG', '每轮整理的逐文件明细'],
+  };
+
+  function syncViewMeta() {
+    const root = $('#pageRoot');
+    if (root) root.dataset.view = state.tab || 'findings';
+    const m = VIEW_META[state.tab] || VIEW_META.findings;
+    const t = $('#pageTitle'), c = $('#pageCode'), d = $('#pageDesc'), cr = $('#crumbNow');
+    if (t) t.textContent = m[0];
+    if (c) c.textContent = m[1];
+    if (d) d.textContent = m[2];
+    if (cr) cr.textContent = m[0];
+    document.title = m[0] + ' · 漏扫控制台';
+  }
+
   // 状态分段与筛选下拉必须同源，否则会出现「上面写着待审查、下拉却是全部」的自相矛盾
   function syncStatusTabs() {
     const box = $('#statusTabs');
@@ -170,7 +191,8 @@
 
   function rowHtml(r) {
     const sel = state.selected.has(r.id) ? 'sel' : '';
-    const ev = r.evidence ? `<div class="ev">${esc(r.evidence).slice(0, 220)}</div>` : '';
+    const evText = r.evidence ? String(r.evidence).slice(0, 260) : '';
+    const evTitle = evText ? `<div class="ev" title="${esc(evText)}">${esc(evText)}</div>` : '';
     const par = r.param ? `<div class="par">参数：${esc(r.param)}</div>` : '';
     // 没有资产/端点时（比如从审计报告 Markdown 提炼的条目），把来源文件名挂出来，别让人对着空列猜
     const fileBase = (r.files || '').split('/').pop();
@@ -196,8 +218,8 @@
       <td><select class="status-select" data-id="${r.id}" data-s="${esc(r.status)}">${statusOpts}</select></td>
       <td><span class="sev ${esc(r.sev)}">${esc(sevCn)}</span></td>
       <td class="mono src-cell">${esc(r.sources)}</td>
-      <td><div class="title-cell">${esc(r.title)}</div>${ev}</td>
-      <td class="asset-cell">${r.asset ? esc(r.asset) : '<span class="muted">—</span>'}${r.port ? `<div class="par">:${esc(r.port)}</div>` : ''}${srcHint}</td>
+      <td><div class="title-cell" title="${esc(r.title)}">${esc(r.title)}</div>${evTitle}</td>
+      <td class="asset-cell">${r.asset ? esc(r.asset) : (srcHint ? '' : '<span class="muted">—</span>')}${r.port ? `<div class="par">:${esc(r.port)}</div>` : ''}${srcHint}</td>
       <td>${url ? `<div class="ep" title="${esc(url)}">${esc(url)}</div>` : '<span class="muted">—</span>'}${par}</td>
       <td class="mono nowrap" style="text-align:right">${r.count}</td>
       <td class="mono muted nowrap">${esc((r.first_seen || '').slice(0, 16))}</td>
@@ -706,7 +728,7 @@
     if (reason) toast(reason);
   }
 
-  async function rescan(force) {
+  async function rescan(force, quiet) {
     const btn = force ? $('#btnForce') : $('#btnRescan');
     const lbl = btn.querySelector('.lbl') || btn;
     const old = lbl.textContent;
@@ -715,12 +737,13 @@
     try {
       const data = await api('/api/rescan', { method: 'POST', body: JSON.stringify({ force: !!force }) });
       const st = data.stats || {};
-      if (st.busy) { toast('已有一轮整理在进行中，稍等'); return; }
+      if (st.busy) { if (!quiet) toast('已有一轮整理在进行中，稍等'); return; }
       const msg = `整理完成：解析 ${st.parsed} 个文件，新增 ${st.findings_added} 条 / 合并 ${st.findings_merged} 条，`
         + `资产 ${st.assets}，跳过 ${st.skipped}，未变 ${st.unchanged}，失败 ${st.errors}，耗时 ${st.elapsed}s`;
       state.offset = 0;
       state.selected.clear();
-      await refreshAll(msg);
+      // 打开页面时的自动整理不弹提示；只有真扫出新东西才说一声
+      await refreshAll(quiet && !st.findings_added ? '' : msg);
       if (st.errors) await loadLog();
     } catch (err) {
       toast('整理失败：' + err.message, 6000);
@@ -812,6 +835,7 @@
         ['findings', 'assets', 'scan', 'files', 'log'].forEach((k) => {
           $('#view-' + k).classList.toggle('hidden', k !== state.tab);
         });
+        syncViewMeta();
         await refreshAll('');
         return;
       }
@@ -936,6 +960,7 @@
           const t = document.querySelector('.tab[data-tab="findings"]');
           if (t) t.click();
         } else {
+          syncViewMeta();
           await loadFindings();
         }
       });
@@ -994,7 +1019,7 @@
     bind();
     loadScanMeta();   // 引擎探测放后台，不挡首屏
     try {
-      await rescan(false); // 打开即自动整理
+      await rescan(false, true); // 打开即自动整理（静默）
     } catch (err) {
       toast('初始整理失败：' + err.message, 6000);
       await refreshAll('');
