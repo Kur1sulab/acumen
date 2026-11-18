@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import pathlib
+import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -37,16 +38,46 @@ FORBIDDEN_FRONTEND = [
 ]
 
 
-def iter_py() -> list[pathlib.Path]:
+def _tracked_py() -> list[pathlib.Path] | None:
+    """git 仓库内只认被跟踪的文件——那才是真正会被拷走的交付面。
+
+    本地随手丢的开发探针（_probe_*.py 之类）不该让门禁变红，但它们也不会进交付包，
+    所以按 git 的视角判断比按目录视角更接近事实。没有 .git（zip 下载）时返回 None。
+    """
+    if not (ROOT / ".git").exists():
+        return None
+    try:
+        raw = subprocess.run(
+            ["git", "-C", str(ROOT), "ls-files", "-z", "--", "*.py"],
+            capture_output=True, check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    names = [n for n in raw.decode("utf-8", "replace").split("\0") if n]
+    return [ROOT / n for n in sorted(names)]
+
+
+def iter_py() -> tuple[list[pathlib.Path], bool]:
+    """返回 (待检查文件, 是否只看了 git 跟踪的文件)。"""
+    tracked = _tracked_py()
+    if tracked is not None:
+        files = [
+            p for p in tracked
+            if p.exists()
+            and not any(part in SKIP_DIRS for part in p.parts)
+            and not p.relative_to(ROOT).as_posix().startswith(SKIP_PREFIX)
+        ]
+        return files, True
+
     out = []
     for p in sorted(ROOT.rglob("*.py")):
         rel = p.relative_to(ROOT).as_posix()
         if any(part in SKIP_DIRS for part in p.parts):
             continue
-        if rel.startswith(SKIP_PREFIX):
+        if rel.startswith(SKIP_PREFIX) or p.name.startswith("_"):
             continue
         out.append(p)
-    return out
+    return out, False
 
 
 def top_of(node: ast.AST) -> list[str]:
@@ -60,7 +91,7 @@ def top_of(node: ast.AST) -> list[str]:
 
 
 def main() -> int:
-    files = iter_py()
+    files, tracked_only = iter_py()
     bad: list[str] = []
 
     for path in files:
@@ -93,7 +124,8 @@ def main() -> int:
         print("\n这个项目的卖点就是零依赖，上面的东西会让它没法拷进离线环境。")
         return 1
 
-    print(f"✓ 通过：{len(files)} 个 Python 文件全部只用标准库；前端无构建链")
+    scope = "git 跟踪文件" if tracked_only else "全量遍历"
+    print(f"✓ 通过：{len(files)} 个 Python 文件全部只用标准库（{scope}）；前端无构建链")
     return 0
 
 
