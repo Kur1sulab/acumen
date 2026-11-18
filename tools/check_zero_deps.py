@@ -21,6 +21,9 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 ALLOWED_TOP = set(sys.stdlib_module_names) | {"vc"}
 
 SKIP_DIRS = {".git", "__pycache__", ".venv", "venv", "node_modules", "build", "dist"}
+# 引擎（Go）与它的素材不是 Python 交付物：里面的 .py 是上游 litmus2 的口径生成脚本，
+# 不随包运行，也不该按「Python 零依赖」来判
+SKIP_PREFIX_EXTRA = ("engine-go/",)
 
 # 这些路径下的文件不参与检查（测试自己可以随便 import）
 SKIP_PREFIX = ("tests/",)
@@ -66,6 +69,7 @@ def iter_py() -> tuple[list[pathlib.Path], bool]:
             if p.exists()
             and not any(part in SKIP_DIRS for part in p.parts)
             and not p.relative_to(ROOT).as_posix().startswith(SKIP_PREFIX)
+            and not p.relative_to(ROOT).as_posix().startswith(SKIP_PREFIX_EXTRA)
         ]
         return files, True
 
@@ -74,7 +78,7 @@ def iter_py() -> tuple[list[pathlib.Path], bool]:
         rel = p.relative_to(ROOT).as_posix()
         if any(part in SKIP_DIRS for part in p.parts):
             continue
-        if rel.startswith(SKIP_PREFIX) or p.name.startswith("_"):
+        if rel.startswith(SKIP_PREFIX) or rel.startswith(SKIP_PREFIX_EXTRA) or p.name.startswith("_"):
             continue
         out.append(p)
     return out, False

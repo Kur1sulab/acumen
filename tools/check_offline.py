@@ -7,10 +7,10 @@
     smtplib、ftplib、socket——它们全在标准库里，零依赖检查一律放行，
     照样能把数据发出去。
 
-    空境的战场是离线内网、只进不出的 VDI、以及不允许外连的评测现场。
-    出站请求在那里有两重后果：功能上必然超时卡死（用户以为程序坏了），
-    合规上属于违规外连（现场直接判负）。所以「不出网」需要一条独立的、
-    会失败的检查，而不是写在 README 里的一句承诺。
+    空境是扫描器：请求目标是它的本职，所以这里守的不是「一个包都不发」，
+    而是「只朝目标发，不朝第三方发」——没有遥测、没有云查杀、没有更新检查。
+    Python 侧唯一会自己建连的地方是 vc/cli.py 的 probe_scheme（先握手判 http/https，
+    连的是用户给的目标）；真正的扫描由 Go 引擎子进程完成，不在本检查范围。
 
 检查四类：
     A. Python 侧：出站模块 import（含标准库出站模块）
@@ -50,7 +50,7 @@ BANNED_MODULES = {
     "imaplib",
     "nntplib",
     "xmlrpc.client",
-    "socket",            # 裸 socket 一律禁；监听请用 http.server
+    "socket",            # 裸 socket 一律禁（唯一例外见 ALLOW_MODULES）
     # 第三方出站库再列一遍：zero_deps 已经拦了，这里双保险
     "requests",
     "httpx",
@@ -60,6 +60,11 @@ BANNED_MODULES = {
     "websockets",
     "paramiko",
     "pycurl",
+}
+
+# 允许的例外：文件 → 模块。只为「对目标握手」开这一个口子，别的文件照样拦。
+ALLOW_MODULES = {
+    "vc/cli.py": {"socket"},
 }
 
 # ── B. 子进程外部下载器 ──────────────────────────────────────────────
@@ -130,7 +135,8 @@ def module_name_of(node: ast.AST) -> list[tuple[str, int]]:
 
 def scan_python(path: pathlib.Path) -> list[str]:
     problems: list[str] = []
-    rel = path.relative_to(ROOT)
+    # as_posix：ALLOW_MODULES 的键是字符串，纯 Path 查表永远查不到
+    rel = path.relative_to(ROOT).as_posix()
     try:
         tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"), filename=str(path))
     except SyntaxError as exc:
@@ -144,6 +150,8 @@ def scan_python(path: pathlib.Path) -> list[str]:
                 if name == banned or name.startswith(banned + "."):
                     hit = banned
                     break
+            if hit and hit in ALLOW_MODULES.get(rel, set()):
+                hit = ""          # 文件级例外：vc/cli.py 的 probe_scheme 只对目标握手
             if hit:
                 problems.append(f"  {rel}:{line}  import {name}（出站模块 {hit}）")
 

@@ -34,6 +34,27 @@ jobs:
       - name: 跑单测
         run: python -m unittest discover -s tests -v
 
+  engine:
+    name: 引擎（Go）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: engine-go/go.mod
+      - name: go vet
+        working-directory: engine-go
+        run: go vet ./...
+      - name: 三平台都要能编出来
+        working-directory: engine-go
+        run: |
+          set -e
+          go build -o /tmp/sweep-linux ./cmd/sweep
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/sweep.exe ./cmd/sweep
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o /tmp/sweep-darwin ./cmd/sweep
+          /tmp/sweep-linux version
+          ls -l /tmp/sweep-linux /tmp/sweep.exe /tmp/sweep-darwin
+
   zero-dep:
     name: 零依赖自检
     runs-on: ubuntu-latest
@@ -46,25 +67,12 @@ jobs:
         run: python tools/check_zero_deps.py
 
   offline:
-    name: 离网自检（无出站能力）
+    name: 只朝目标发请求（不朝第三方）
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: 不得存在出站模块 / 外部资源引用 / 下载命令
+      - name: 无遥测 / 无云查杀 / 无更新检查
         run: python tools/check_offline.py
-
-  frontend:
-    name: 前端零构建自检
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: JS 语法检查
-        run: |
-          set -e
-          for js in $(find vc/ui -name '*.js'); do
-            node --check "$js"
-            echo "OK  $js"
-          done

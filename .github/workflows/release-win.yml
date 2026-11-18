@@ -3,6 +3,7 @@ name: Windows 绿色版
 # 只在真 Windows 上构建和验证。
 # 为什么不用 ubuntu 交叉组装：结构能拼出来，但 ._pth 路径解析、GBK 控制台、
 # sqlite3.dll 能否加载、bat 能否被 cmd 执行——这四件事只有 Windows 说了算。
+# 引擎（Go）先在 ubuntu 上交叉编译成 sweep.exe，再进 Windows 作业组装。
 on:
   push:
     tags:
@@ -13,8 +14,31 @@ permissions:
   contents: write
 
 jobs:
+  engine:
+    name: 交叉编译引擎（sweep.exe）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: engine-go/go.mod
+      - name: 编译 Windows 引擎
+        working-directory: engine-go
+        run: |
+          mkdir -p ../build
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
+            -ldflags "-s -w -X github.com/Kur1sulab/kara/engine-go/cli.Version=v1.1.0" \
+            -o ../build/sweep-win64.exe ./cmd/sweep
+          ls -l ../build/sweep-win64.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sweep-win64
+          path: build/sweep-win64.exe
+          if-no-files-found: error
+
   bundle:
     name: 组装 + 真机冒烟（windows-latest）
+    needs: engine
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,6 +46,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: sweep-win64
+          path: build
 
       - name: 取官方 embeddable 运行时
         shell: pwsh
@@ -44,7 +73,10 @@ jobs:
           # 标志位，和用户双击解压是同一套逻辑。Windows 自带的 bsdtar 即使包里标了
           # UTF-8，遇到非 ASCII 名称仍会报 "empty or unreadable filename" 并以 1 退出
           # ——所以打包侧的文件名也一并改成纯 ASCII，两头都不赌。
-          Expand-Archive -Path dist\kara-1.1.0-win64.zip -DestinationPath smoke -Force
+          $zip = Get-ChildItem dist\kara-*-win64.zip | Select-Object -First 1
+          if (-not $zip) { throw "没有产出 zip" }
+          Write-Host "交付物: $($zip.Name)"
+          Expand-Archive -Path $zip.FullName -DestinationPath smoke -Force
           Write-Host "--- 解压结果 ---"
           Get-ChildItem smoke | Select-Object Name, Length | Format-Table -AutoSize
 
@@ -55,9 +87,9 @@ jobs:
           Write-Host "--- 包内解释器 ---"
           .\python\python.exe -c "import sys; print(sys.version); print(sys.executable)"
           Write-Host "--- 模块导入（验证 ._pth 的 .. 生效）---"
-          .\python\python.exe -c "import vc.server, vc.store, vc.parsers, vc.scans, vc.ingest; print('IMPORT-OK')"
+          .\python\python.exe -c "import vc.cli, vc.paths, vc.store, vc.parsers, vc.scans, vc.ingest; print('IMPORT-OK')"
 
-      - name: 端到端冒烟（包内解释器真起服务）
+      - name: 端到端冒烟（包内解释器真跑 CLI）
         shell: pwsh
         working-directory: smoke
         run: .\python\python.exe tests\smoke_bundle.py
@@ -66,26 +98,11 @@ jobs:
         shell: pwsh
         working-directory: smoke
         run: |
-          $p = Start-Process -FilePath "cmd.exe" `
-               -ArgumentList "/c kara.bat --port 7799 --no-watch" `
-               -PassThru -WindowStyle Hidden
-          $ok = $false
-          for ($i = 0; $i -lt 30; $i++) {
-            Start-Sleep -Milliseconds 800
-            try {
-              $r = Invoke-WebRequest -Uri "http://127.0.0.1:7799/api/health" `
-                   -UseBasicParsing -TimeoutSec 2
-              if ($r.StatusCode -eq 200) {
-                Write-Host "HTTP 200 -> $($r.Content)"
-                $ok = $true
-                break
-              }
-            } catch { }
-          }
-          Get-Process python -ErrorAction SilentlyContinue | Stop-Process -Force
-          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-          if (-not $ok) { throw "kara.bat 没把服务拉起来 —— 交付物不可用" }
-          Write-Host "OK kara.bat 在真 Windows 上启动成功"
+          $out = cmd.exe /c "kara.bat" 2>&1 | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -ne 0) { throw "kara.bat 退出码 $LASTEXITCODE" }
+          if ($out -notmatch "空境") { throw "kara.bat 没打出状态页 —— 交付物不可用" }
+          Write-Host "OK kara.bat 在真 Windows 上可用"
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
