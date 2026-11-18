@@ -11,7 +11,7 @@
   --line-strong: rgba(16, 24, 40, 0.16);
   --fg: #0f172a;
   --muted: #5f6b7d;
-  --faint: #98a2b3;
+  --faint: #667085;   /* 白底 4.97:1 / 页面底 4.59:1 —— 小字元信息也要过 AA */
 
   /* 白底可读性优先：accent 取深一档（白底 5.38:1、白字压在上面也 5.38:1，双向过 AA） */
   --accent: #0a7a4e;
@@ -52,7 +52,7 @@
   --line-strong: rgba(255, 255, 255, 0.14);
   --fg: #e6edf3;
   --muted: #98a3b3;
-  --faint: #6b7686;
+  --faint: #7b8697;   /* 暗底 5.28:1 */
 
   --accent: #00ff88;
   --accent-fg: #06281a;
@@ -339,3 +339,106 @@ select.input option { background: var(--panel-solid); color: var(--fg); }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: var(--scroll); border-radius: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
+/* ---------------------------------------------------------------- 资产：卡片网格 */
+
+.assetbar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 2px 2px 12px;
+}
+.assetbar .muted { font-size: 11.5px; }
+
+.seg {
+  display: inline-flex; gap: 2px; padding: 2px;
+  background: var(--fill); border: 1px solid var(--line); border-radius: 999px;
+}
+.segbtn {
+  border: 0; background: transparent; color: var(--muted);
+  font: inherit; font-size: 12px; padding: 4px 11px; border-radius: 999px;
+  cursor: pointer; transition: background 0.15s, color 0.15s;
+}
+.segbtn:hover { color: var(--fg); }
+.segbtn.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.segbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.assetgrid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(322px, 1fr));
+  gap: 12px; align-content: start;
+  height: calc(100% - 46px); overflow: auto; padding: 2px 4px 20px 2px;
+}
+.asset-empty { grid-column: 1 / -1; padding: 60px 0; }
+
+.acard {
+  position: relative;
+  display: flex; flex-direction: column; gap: 8px;
+  min-height: 126px;
+  padding: 12px 13px 11px 16px;
+  background: var(--fill);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  cursor: pointer;
+  transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease;
+}
+/* 左侧竖条 = 该资产的最高风险等级（没漏洞时退成中性线） */
+.acard::before {
+  content: ''; position: absolute; left: 0; top: 11px; bottom: 11px; width: 3px;
+  border-radius: 3px; background: var(--sev, var(--line-strong));
+}
+.acard:hover { transform: translateY(-2px); box-shadow: var(--shadow); border-color: var(--line-strong); }
+.acard:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.acard:hover .acard-host { color: var(--accent); }
+
+.acard-top { display: flex; align-items: center; gap: 8px; }
+.acard-host {
+  flex: 1 1 auto; min-width: 0;
+  font-family: var(--mono); font-size: 13.5px; font-weight: 600; letter-spacing: 0.1px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  transition: color 0.15s;
+}
+.acard-sub {
+  display: flex; align-items: center; gap: 5px; min-width: 0;
+  font-family: var(--mono); font-size: 11px; color: var(--faint);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.acard-sub .sep { opacity: 0.5; }
+.acard-title.hint { color: var(--muted); }
+.hint-tag {
+  display: inline-block; margin-right: 5px; padding: 0 5px;
+  font-size: 10px; line-height: 15px; border-radius: 5px;
+  color: var(--accent); background: var(--accent-soft); vertical-align: 1px;
+}
+.acard-title {
+  font-size: 12px; color: var(--muted); line-height: 1.42;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+
+.pchips { display: flex; flex-wrap: wrap; gap: 5px; }
+.pchip {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--mono); font-size: 11px; line-height: 1;
+  padding: 4px 8px; border-radius: 999px;
+  background: var(--panel-solid); border: 1px solid var(--line); color: var(--ep);
+}
+.pchip i { width: 5px; height: 5px; border-radius: 50%; background: var(--dot, var(--faint)); flex: 0 0 auto; }
+.pchip.more { background: transparent; border-style: dashed; color: var(--muted); }
+.acard-nop { font-size: 11px; color: var(--faint); }
+
+.mixbar {
+  display: flex; gap: 1px; height: 4px; border-radius: 99px; overflow: hidden;
+  background: var(--line-soft); margin-top: 1px;
+}
+.mixbar span { height: 100%; border-radius: 99px; opacity: 0.9; }
+
+.acard-foot {
+  display: flex; align-items: center; gap: 6px;
+  margin-top: auto; padding-top: 2px;
+  font-size: 11px; color: var(--muted);
+}
+.acard .go {
+  color: var(--faint); font-size: 14px; line-height: 1;
+  opacity: 0; transform: translateX(-3px);
+  transition: opacity 0.16s, transform 0.16s, color 0.16s;
+}
+.acard:hover .go { opacity: 1; transform: translateX(0); color: var(--accent); }
+.acard-foot .n { font-weight: 600; color: var(--fg); }
+.acard-foot .sep { opacity: 0.45; }
+.acard-foot .grow { flex: 1 1 auto; }

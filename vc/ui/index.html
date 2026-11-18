@@ -117,14 +117,18 @@
         </div>
       </div>
 
-      <!-- 资产表 -->
+      <!-- 资产：卡片网格（不做表格） -->
       <div class="view hidden" id="view-assets">
-        <table class="table">
-          <thead>
-            <tr><th>主机</th><th class="w-ip">IP</th><th>开放端口 / 指纹</th><th>标题</th><th class="w-src">来源</th><th class="w-time">最近</th></tr>
-          </thead>
-          <tbody id="assetsBody"><tr><td colspan="6" class="muted center">加载中…</td></tr></tbody>
-        </table>
+        <div class="assetbar">
+          <div class="seg" id="assetSort">
+            <button class="segbtn on" data-sort="risk">风险优先</button>
+            <button class="segbtn" data-sort="ports">端口最多</button>
+            <button class="segbtn" data-sort="recent">最近见过</button>
+          </div>
+          <button class="btn ghost small" id="assetOnlyRisk">只看有漏洞</button>
+          <span class="muted" id="assetCount">—</span>
+        </div>
+        <div class="assetgrid" id="assetsGrid"><div class="muted center asset-empty">加载中…</div></div>
       </div>
 
       <!-- 收件箱状态 -->

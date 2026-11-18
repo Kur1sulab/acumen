@@ -139,22 +139,112 @@
 
   // ------------------------------------------------------------ 资产 / 文件 / 日志
 
+  // 资产视图：卡片网格（表格读不出"这台机器长什么样"，卡片能）
+
+  const ASSET_SORT_KEY = 'vc-asset-sort';
+  const SEV_RANK = { critical: 5, high: 4, medium: 3, low: 2, info: 1 };
+  const SEV_VAR = { critical: 'var(--crit)', high: 'var(--high)', medium: 'var(--med)', low: 'var(--low)', info: 'var(--info)' };
+  const assetView = {
+    sort: (() => { try { return localStorage.getItem(ASSET_SORT_KEY) || 'risk'; } catch (e) { return 'risk'; } })(),
+    onlyRisk: false,
+  };
+
+  // 服务 → 圆点颜色（按"这东西一般多危险"分档，纯提示不是判定）
+  function dotFor(svc) {
+    const s = String(svc || '').toLowerCase();
+    if (/^(mysql|mssql|oracle|postgres|redis|mongo|memcache|elastic|db)/.test(s)) return 'var(--low)';
+    if (/^(smb|netbios|ldap|rsync|nfs)/.test(s)) return 'var(--crit)';
+    if (/^(ssh|rdp|telnet|vnc|winrm)/.test(s)) return 'var(--med)';
+    if (/(http|nginx|apache|tomcat|iis|web)/.test(s)) return 'var(--accent)';
+    if (/^(ftp|mail|smtp|imap|pop)/.test(s)) return 'var(--info)';
+    return 'var(--faint)';
+  }
+
+  function ago(ts) {
+    if (!ts) return '—';
+    const t = Date.parse(String(ts).replace(' ', 'T'));
+    if (!t) return String(ts).slice(0, 16);
+    const mins = Math.floor((Date.now() - t) / 60000);
+    if (mins < 1) return '刚刚';
+    if (mins < 60) return mins + ' 分钟前';
+    if (mins < 1440) return Math.floor(mins / 60) + ' 小时前';
+    if (mins < 43200) return Math.floor(mins / 1440) + ' 天前';
+    return String(ts).slice(0, 10);
+  }
+
+  function assetCard(a) {
+    const ports = a.ports || [];
+    const mix = a.sev_mix || {};
+    const top = a.top_sev || '';
+    const badge = top ? `<span class="sev ${esc(top)}">${esc(top)}${a.n_find > 1 ? ' ×' + a.n_find : ''}</span>` : '';
+    const svcLine = String(a.services || '').split(',').filter(Boolean).slice(0, 3)
+      .map((s) => s.split('/').filter((x) => x && x !== 'conn_keepalive' && x !== 'tcp').pop() || s).join(' · ');
+    const maxChips = 5;
+    const chips = ports.slice(0, maxChips).map((p) => {
+      const svc = String(p.service || p.proto || '').split('/').filter((x) => x && x !== 'conn_keepalive').pop() || '';
+      const tip = [a.host + ':' + p.port, p.proto, p.service, p.title].filter(Boolean).join(' · ');
+      return `<span class="pchip" style="--dot:${dotFor(svc)}" title="${esc(tip)}"><i></i>${esc(p.port)}${svc && svc !== 'tcp' ? ' · ' + esc(svc) : ''}</span>`;
+    }).join('');
+    const more = ports.length > maxChips ? `<span class="pchip more">+${ports.length - maxChips}</span>` : '';
+    const bar = ['critical', 'high', 'medium', 'low', 'info'].filter((k) => mix[k])
+      .map((k) => `<span style="flex:${mix[k]};background:${SEV_VAR[k]}" title="${k} ${mix[k]}"></span>`).join('');
+    const sub = [];
+    if (a.ip && a.ip !== a.host) sub.push(esc(a.ip));
+    if (svcLine) sub.push(esc(svcLine));
+    // 标题：扫描器的 title 常是「A|B|A」这种拼接，去重压成一行；没有 title 就用最高等级那条漏洞名
+    const rawTitle = String(a.title || '').split('|').map((s) => s.trim()).filter(Boolean);
+    const uniqTitle = [...new Set(rawTitle)].slice(0, 2).join(' · ');
+    const shownTitle = uniqTitle || String(a.hint || '').trim();
+    const title = shownTitle
+      ? `<div class="acard-title${uniqTitle ? '' : ' hint'}" title="${esc(shownTitle)}">${uniqTitle ? '' : '<span class="hint-tag">最高</span>'}${esc(shownTitle)}</div>`
+      : '';
+    return `<div class="acard" role="button" tabindex="0" data-asset="${esc(a.host)}"
+        style="--sev:${top ? SEV_VAR[top] : 'var(--line-strong)'}"
+        aria-label="${esc(a.host)}：${a.n_find || 0} 条漏洞，${ports.length} 个端口">
+      <div class="acard-top">
+        <div class="acard-host" title="${esc(a.host)}">${esc(a.host)}</div>
+        ${badge}
+      </div>
+      ${sub.length ? `<div class="acard-sub">${sub.join('<span class="sep">·</span>')}</div>` : ''}
+      ${title}
+      ${ports.length ? `<div class="pchips">${chips}${more}</div>` : '<div class="acard-nop">没有端口信息</div>'}
+      ${bar ? `<div class="mixbar">${bar}</div>` : ''}
+      <div class="acard-foot">
+        <span class="n">${a.n_find ? a.n_find + ' 条漏洞' : '暂无漏洞'}</span>
+        <span class="sep">·</span><span class="mono">${esc(a.sources || '—')}</span>
+        <span class="grow"></span>
+        <span class="mono" title="${esc(a.last_seen || '')}">${esc(ago(a.last_seen))}</span>
+        <span class="go" aria-hidden="true">›</span>
+      </div>
+    </div>`;
+  }
+
+  function sortAssets(rows) {
+    const by = assetView.sort;
+    return rows.slice().sort((x, y) => {
+      if (by === 'ports') return (y.ports || []).length - (x.ports || []).length || String(x.host).localeCompare(String(y.host));
+      if (by === 'recent') return String(y.last_seen || '').localeCompare(String(x.last_seen || ''));
+      const r = (SEV_RANK[y.top_sev] || 0) - (SEV_RANK[x.top_sev] || 0);
+      return r || (y.n_find || 0) - (x.n_find || 0)
+        || (y.ports || []).length - (x.ports || []).length || String(x.host).localeCompare(String(y.host));
+    });
+  }
+
   async function loadAssets() {
     const qs = new URLSearchParams({ limit: 300 });
     if (state.q) qs.set('q', state.q);
     const data = await api('/api/assets?' + qs.toString());
-    const rows = data.rows || [];
-    $('#assetsBody').innerHTML = rows.length ? rows.map((a) => {
-      const ports = (a.ports || []).map((p) => `${esc(p.port)}/${esc(p.proto || 'tcp')}${p.service ? ' · ' + esc(p.service) : ''}`).join('<br>');
-      return `<tr>
-        <td class="mono">${esc(a.host)}</td>
-        <td class="mono muted">${esc(a.ip || '—')}</td>
-        <td class="ep">${ports || '<span class="muted">—</span>'}</td>
-        <td>${esc(a.title || '—')}</td>
-        <td class="mono">${esc(a.sources)}</td>
-        <td class="mono muted nowrap">${esc((a.last_seen || '').slice(0, 16))}</td>
-      </tr>`;
-    }).join('') : '<tr><td colspan="6" class="muted center">还没有资产记录（收件箱里没有端口扫描类产物？）</td></tr>';
+    let rows = data.rows || [];
+    if (assetView.onlyRisk) rows = rows.filter((a) => (a.n_find || 0) > 0);
+    rows = sortAssets(rows);
+    $('#assetCount').textContent = `${rows.length} / ${data.total || rows.length} 个资产`
+      + (assetView.onlyRisk ? '（有漏洞）' : '');
+    $('#assetOnlyRisk').classList.toggle('on', assetView.onlyRisk);
+    $('#assetSort').querySelectorAll('.segbtn')
+      .forEach((b) => b.classList.toggle('on', b.dataset.sort === assetView.sort));
+    $('#assetsGrid').innerHTML = rows.length
+      ? rows.map(assetCard).join('')
+      : `<div class="muted center asset-empty">还没有资产记录${state.q ? '（当前搜索词下）' : '——收件箱里没有端口扫描类产物？'}</div>`;
   }
 
   async function loadFiles() {
@@ -238,6 +328,35 @@
       const typeLi = e.target.closest('#topTypes li[data-q]');
       if (typeLi) { state.q = typeLi.dataset.q; $('#search').value = state.q; state.offset = 0; await loadFindings(); return; }
 
+      // 资产卡 / 排序 / 只看有漏洞
+      const card = e.target.closest('.acard[data-asset]');
+      if (card) {
+        const tab = document.querySelector('.tab[data-tab="findings"]');
+        if (tab && state.tab !== 'findings') tab.click();
+        state.q = card.dataset.asset;
+        state.sev = '';
+        state.status = '';
+        $('#search').value = state.q;
+        document.querySelectorAll('.chip').forEach((c) => c.classList.toggle('on', !c.dataset.sev));
+        state.offset = 0;
+        state.selected.clear();
+        await loadFindings();
+        toast('已筛出「' + state.q + '」的条目');
+        return;
+      }
+      const segBtn = e.target.closest('#assetSort .segbtn');
+      if (segBtn) {
+        assetView.sort = segBtn.dataset.sort || 'risk';
+        try { localStorage.setItem(ASSET_SORT_KEY, assetView.sort); } catch (err) { /* 忽略 */ }
+        await loadAssets();
+        return;
+      }
+      if (e.target.closest('#assetOnlyRisk')) {
+        assetView.onlyRisk = !assetView.onlyRisk;
+        await loadAssets();
+        return;
+      }
+
       const tab = e.target.closest('.tab');
       if (tab) {
         state.tab = tab.dataset.tab;
@@ -248,6 +367,11 @@
         await refreshAll('');
         return;
       }
+    });
+
+    document.addEventListener('keydown', (e) => {
+      const card = e.target.closest && e.target.closest('.acard[data-asset]');
+      if (card && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); card.click(); }
     });
 
     document.addEventListener('change', async (e) => {

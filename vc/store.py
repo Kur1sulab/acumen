@@ -15,6 +15,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -300,18 +301,27 @@ class Store:
             ).fetchall()
         return {"total": total, "rows": [dict(r) for r in rows]}
 
+    SEV_ORDER = ("critical", "high", "medium", "low", "info")
+
     def assets(self, q: str = "", limit: int = 300, offset: int = 0) -> Dict[str, Any]:
+        """资产清单 = 资产表 ∪ 漏洞里出现过的资产。
+
+        两边的"主机名"经常不是同一套命名（端口扫描给 public-ip-xxx，报告里是 10.71.x.x），
+        只查资产表会得到一堆"暂无漏洞"的空卡 —— 所以漏洞侧出现的资产也补成一行，
+        ports / 来源 / 风险全从既有记录里推出来。
+        """
         where, args = [], []
         if q:
             where.append("(host LIKE ? OR ip LIKE ? OR services LIKE ? OR title LIKE ?)")
             args.extend([f"%{q}%"] * 4)
         clause = ("WHERE " + " AND ".join(where)) if where else ""
         with self.lock:
-            total = self.conn.execute(f"SELECT COUNT(*) c FROM assets {clause}", args).fetchone()["c"]
-            rows = self.conn.execute(
-                f"SELECT * FROM assets {clause} ORDER BY host LIMIT ? OFFSET ?", args + [limit, offset]
-            ).fetchall()
-        out = []
+            rows = self.conn.execute(f"SELECT * FROM assets {clause} ORDER BY host", args).fetchall()
+            fagg = self.conn.execute(
+                "SELECT asset, sev, port, COUNT(*) n, MAX(last_seen) ls, GROUP_CONCAT(DISTINCT sources) src "
+                "FROM findings WHERE asset <> '' GROUP BY asset, sev, port").fetchall()
+        out: List[Dict[str, Any]] = []
+        by_host: Dict[str, Dict[str, Any]] = {}
         for r in rows:
             d = dict(r)
             try:
@@ -319,7 +329,65 @@ class Store:
             except json.JSONDecodeError:
                 d["ports"] = []
             out.append(d)
-        return {"total": total, "rows": out}
+            by_host[d["host"]] = d
+
+        with self.lock:
+            # 每个资产"最高等级那条漏洞"的标题 —— 资产卡标题空的时候拿它填，比留白有用
+            tops = self.conn.execute(
+                "SELECT asset, title FROM findings WHERE asset <> '' AND title <> '' "
+                "ORDER BY asset, sev_rank DESC, count DESC").fetchall()
+        hint: Dict[str, str] = {}
+        for t in tops:
+            hint.setdefault(t["asset"], t["title"])
+
+        risk: Dict[str, Dict[str, Any]] = {}
+        for a in fagg:
+            host = a["asset"]
+            item = risk.setdefault(host, {"mix": {}, "ports": set(), "sources": set(), "last": ""})
+            item["mix"][a["sev"] or "info"] = item["mix"].get(a["sev"] or "info", 0) + a["n"]
+            if a["port"]:
+                item["ports"].add(int(a["port"]))
+            for s in str(a["src"] or "").split(","):
+                if s.strip():
+                    item["sources"].add(s.strip())
+            if (a["ls"] or "") > item["last"]:
+                item["last"] = a["ls"] or ""
+
+        for host, item in risk.items():
+            d = by_host.get(host)
+            if d is None:
+                if q and q.lower() not in str(host).lower():
+                    continue
+                covered = {int(p.get("port") or 0) for p in ([] if d is None else d["ports"])}
+                d = {
+                    "host": host, "ip": host if re.match(r"^\d+\.\d+\.\d+\.\d+$", host) else "",
+                    "ports": [{"port": p, "proto": "tcp", "service": ""}
+                              for p in sorted(item["ports"] - covered)],
+                    "services": "", "title": "", "fingerprint": "",
+                    "sources": ",".join(sorted(item["sources"])) or "report",
+                    "first_seen": "", "last_seen": item["last"],
+                }
+                out.append(d)
+                by_host[host] = d
+            else:
+                covered = {int(p.get("port") or 0) for p in d["ports"]}
+                for p in sorted(item["ports"] - covered):
+                    d["ports"].append({"port": p, "proto": "tcp", "service": ""})
+                if not d.get("last_seen") or (item["last"] or "") > d["last_seen"]:
+                    d["last_seen"] = item["last"]
+                if not d.get("sources"):
+                    d["sources"] = ",".join(sorted(item["sources"]))
+
+        for d in out:
+            m = (risk.get(d.get("host") or "") or {}).get("mix") or {}
+            d["sev_mix"] = {k: m.get(k, 0) for k in self.SEV_ORDER}
+            d["n_find"] = sum(d["sev_mix"].values())
+            d["top_sev"] = next((k for k in self.SEV_ORDER if d["sev_mix"][k]), "")
+            d["hint"] = hint.get(d.get("host") or "", "")
+
+        out.sort(key=lambda d: str(d.get("host") or ""))
+        total = len(out)
+        return {"total": total, "rows": out[offset:offset + limit]}
 
     def set_status(self, ids: List[int], status: str) -> int:
         if status not in STATUS_CHOICES:
