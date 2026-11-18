@@ -1,4 +1,4 @@
-# 鉴微 · Acumen
+# 空境 · Kara
 
 **小而精的本地漏扫。** 填目标 → 开扫 → 命中入账 → 复验 → 导报告，全程只跑在 `127.0.0.1`，不发一个外部请求。
 
@@ -21,7 +21,7 @@
 ./run.sh --port 7799     # 换端口
 ```
 
-**Windows**：下 Releases 里的 `acumen-*-win64.zip`，解压双击 `acumen.bat`，不需要装 Python 也不需要 Go。
+**Windows**：下 Releases 里的 `kara-*-win64.zip`，解压双击 `kara.bat`，不需要装 Python 也不需要 Go。
 
 引擎按 `engine/sweep` → `PATH` 上的 `sweep` → `~/.local/bin/sweep` 顺序找；`--engine /path/to/sweep` 指定后只认它，指错会明确报错。
 
@@ -36,7 +36,7 @@ python3 -m vc.server --scan
 - 只绑 `127.0.0.1`，无鉴权，仅本机单人用
 - 零出站，`tools/check_offline.py` 在 CI 里守这条
 - 引擎用列表参数启动不拼 shell，目标先过字符白名单，并发上限 4，停止走进程组 `TERM → KILL`
-- 数据在 `~/.acumen/vuln.db`（SQLite），删了就是清空重来，不动原始产物
+- 数据在 `~/.kara/vuln.db`（SQLite），删了就是清空重来，不动原始产物
 
 ## 文件
 

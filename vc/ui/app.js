@@ -1,4 +1,4 @@
-/* 鉴微 · 前端逻辑（无框架、无构建步骤） */
+/* 空境 · 前端逻辑（无框架、无构建步骤） */
 (() => {
   const $ = (sel) => document.querySelector(sel);
   // 表格里显示的来源名：去掉自家引擎前缀，一列能放下；完整值留在 title 里
@@ -114,11 +114,11 @@
     if (root) root.dataset.view = state.tab || 'findings';
     const m = VIEW_META[state.tab] || VIEW_META.findings;
     const t = $('#pageTitle'), c = $('#pageCode'), d = $('#pageDesc'), cr = $('#crumbNow');
-    if (t) t.textContent = '鉴微';
+    if (t) t.textContent = '空境';
     if (c) c.textContent = m[1];
     if (d) d.textContent = m[0] + ' · ' + m[2];
     if (cr) cr.textContent = m[0];
-    document.title = '鉴微 · Acumen';
+    document.title = '空境 · Kara';
   }
 
   // 状态分段与筛选下拉必须同源，否则会出现「上面写着待审查、下拉却是全部」的自相矛盾
@@ -1194,7 +1194,7 @@
       const el = $('#appVer');
       if (el && info && info.version) {
         el.textContent = 'v' + info.version;
-        el.title = '鉴微 · Acumen v' + info.version;
+        el.title = '空境 · Kara v' + info.version;
         el.hidden = false;
       }
     } catch (e) { /* 旧后端没有该接口时静默跳过 */ }

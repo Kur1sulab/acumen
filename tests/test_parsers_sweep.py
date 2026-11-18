@@ -36,7 +36,7 @@ class TestHostFromPath(unittest.TestCase):
         self.assertEqual(ps.host_from_path("/tmp/a/b/c.json"), "")
 
     def test_windows_separators(self):
-        p = r"C:\acumen\inbox\scan-2\out\http_example.com\ports.json"
+        p = r"C:\kara\inbox\scan-2\out\http_example.com\ports.json"
         self.assertEqual(ps.host_from_path(p), "example.com")
 
 

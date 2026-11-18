@@ -1,4 +1,4 @@
-"""鉴微 · Acumen —— 本地 Web 服务（stdlib 零依赖）
+"""空境 · Kara —— 本地 Web 服务（stdlib 零依赖）
 
 用法：
     python3 -m vc.server --inbox ~/pentest --inbox ~/pentest-inbox --port 7788 --open
@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import posixpath
+import shutil
 import sys
 import threading
 import time
@@ -183,7 +184,7 @@ class Handler(BaseHTTPRequestHandler):
                                        "engine": "", "summary": {}, "last": [], "elapsed": 0})
                 return self._json(STATE.verifier.status())
             if path == "/api/version":
-                return self._json({"ok": True, "version": __version__, "name": "鉴微 · Acumen"})
+                return self._json({"ok": True, "version": __version__, "name": "空境 · Kara"})
             if path == "/api/health":
                 return self._json({"ok": True, "ts": time.time()})
             if path.startswith("/ui/"):
@@ -299,13 +300,38 @@ def build(inboxes: List[str], db_path: str, watch: bool = True) -> ThreadingHTTP
     return ThreadingHTTPServer(("127.0.0.1", 0), Handler)  # 占位，真端口在 main 里定
 
 
+def default_db_path() -> str:
+    """默认库：~/.kara/vuln.db。
+
+    改过两次名，老库依次在 ~/.sixeyes/vuln.db（短暂）与 ~/.acumen/vuln.db（初版）。
+    新库不存在时按新→旧顺序挑第一个有数据的搬过来，连 -wal/-shm 一起搬——只搬 .db
+    会把 WAL 里没 checkpoint 的命中丢掉。搬不动就原地用老库，不中断。
+    """
+    new = os.path.expanduser("~/.kara/vuln.db")
+    if os.path.exists(new):
+        return new
+    for legacy in ("~/.sixeyes/vuln.db", "~/.acumen/vuln.db"):
+        old = os.path.expanduser(legacy)
+        if not os.path.exists(old):
+            continue
+        try:
+            os.makedirs(os.path.dirname(new), exist_ok=True)
+            for suffix in ("", "-wal", "-shm"):
+                if os.path.exists(old + suffix):
+                    shutil.copy2(old + suffix, new + suffix)
+            return new
+        except OSError:
+            return old
+    return new
+
+
 def main(argv: Optional[List[str]] = None) -> int:
-    ap = argparse.ArgumentParser(description="鉴微 · Acumen —— 本地 Web（零依赖）")
+    ap = argparse.ArgumentParser(description="空境 · Kara —— 本地 Web（零依赖）")
     ap.add_argument("--inbox", action="append", default=None,
                     help=f"收件箱目录，可重复；默认 {DEFAULT_INBOXES}")
     ap.add_argument("--port", type=int, default=7788)
     ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--db", default=os.path.expanduser("~/.acumen/vuln.db"))
+    ap.add_argument("--db", default=default_db_path())
     ap.add_argument("--open", action="store_true", help="启动后自动打开浏览器")
     ap.add_argument("--no-watch", action="store_true", help="关闭后台自动摄入")
     ap.add_argument("--scan", action="store_true", help="只在命令行跑一次摄入然后退出")
@@ -350,20 +376,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     url = f"http://{args.host}:{args.port}/"
     STATE.store.log("info", f"服务启动：{url}　收件箱：{', '.join(STATE.ingestor.inboxes)}")
-    print(f"[acumen] {url}")
-    print(f"[acumen] 收件箱: {', '.join(STATE.ingestor.inboxes)}")
-    print(f"[acumen] 数据库: {args.db}")
+    print(f"[kara] {url}")
+    print(f"[kara] 收件箱: {', '.join(STATE.ingestor.inboxes)}")
+    print(f"[kara] 数据库: {args.db}")
     if STATE.scans:
         if STATE.scans.engine:
-            print(f"[acumen] 扫描引擎: {STATE.scans.engine}")
+            print(f"[kara] 扫描引擎: {STATE.scans.engine}")
         else:
-            print("[acumen] 扫描引擎: 未找到 sweep —— 界面里扫描按钮会提示构建命令")
+            print("[kara] 扫描引擎: 未找到 sweep —— 界面里扫描按钮会提示构建命令")
     if args.open:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
-        print("\n[acumen] 收工")
+        print("\n[kara] 收工")
     finally:
         STATE.stop.set()
         if STATE.scans:

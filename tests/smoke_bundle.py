@@ -80,7 +80,7 @@ def check_engine() -> tuple[str, int]:
 def main() -> int:
     _force_utf8_stdout()
     port = free_port()
-    tmp = tempfile.mkdtemp(prefix="acumen-smoke-")
+    tmp = tempfile.mkdtemp(prefix="kara-smoke-")
     db = os.path.join(tmp, "smoke.db")
 
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
@@ -96,7 +96,7 @@ def main() -> int:
     ]
 
     print("=" * 62)
-    print("鉴微 Acumen · 绿色版冒烟测试")
+    print("空境 Kara · 绿色版冒烟测试")
     print("=" * 62)
     print(f"解释器 : {sys.executable}")
     print(f"版本   : {sys.version.split()[0]}  ({sys.platform})")

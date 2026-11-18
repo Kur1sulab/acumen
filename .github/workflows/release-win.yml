@@ -44,7 +44,7 @@ jobs:
           # 标志位，和用户双击解压是同一套逻辑。Windows 自带的 bsdtar 即使包里标了
           # UTF-8，遇到非 ASCII 名称仍会报 "empty or unreadable filename" 并以 1 退出
           # ——所以打包侧的文件名也一并改成纯 ASCII，两头都不赌。
-          Expand-Archive -Path dist\acumen-1.1.0-win64.zip -DestinationPath smoke -Force
+          Expand-Archive -Path dist\kara-1.1.0-win64.zip -DestinationPath smoke -Force
           Write-Host "--- 解压结果 ---"
           Get-ChildItem smoke | Select-Object Name, Length | Format-Table -AutoSize
 
@@ -62,12 +62,12 @@ jobs:
         working-directory: smoke
         run: .\python\python.exe tests\smoke_bundle.py
 
-      - name: 真跑 acumen.bat
+      - name: 真跑 kara.bat
         shell: pwsh
         working-directory: smoke
         run: |
           $p = Start-Process -FilePath "cmd.exe" `
-               -ArgumentList "/c acumen.bat --port 7799 --no-watch" `
+               -ArgumentList "/c kara.bat --port 7799 --no-watch" `
                -PassThru -WindowStyle Hidden
           $ok = $false
           for ($i = 0; $i -lt 30; $i++) {
@@ -84,13 +84,13 @@ jobs:
           }
           Get-Process python -ErrorAction SilentlyContinue | Stop-Process -Force
           Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-          if (-not $ok) { throw "acumen.bat 没把服务拉起来 —— 交付物不可用" }
-          Write-Host "OK acumen.bat 在真 Windows 上启动成功"
+          if (-not $ok) { throw "kara.bat 没把服务拉起来 —— 交付物不可用" }
+          Write-Host "OK kara.bat 在真 Windows 上启动成功"
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: acumen-win64
+          name: kara-win64
           path: dist/*.zip
           if-no-files-found: error
 

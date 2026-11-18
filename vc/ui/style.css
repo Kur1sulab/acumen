@@ -1,4 +1,4 @@
-/* 鉴微 · 界面（照「天穹」式后台排版组织：浅灰侧栏 + 纯白主区 + 靛蓝强调）
+/* 空境 · 界面（照「天穹」式后台排版组织：浅灰侧栏 + 纯白主区 + 靛蓝强调）
  *
  * 结构层：左 178px 分组导航 / 顶 50px 面包屑工具条 / 主区纵向流水
  *        （标题 → 六联统计 → 状态分段 → 搜索筛选 → 表格 → 底部计数）
@@ -184,14 +184,22 @@ a { color: inherit; }
 }
 
 .brand .logo {
-  width: 20px;
-  height: 20px;
+  width: 22px;
+  height: 22px;
   flex: none;
   display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1.2px solid currentColor;
+  border-radius: 6px;
   color: var(--fg);
+  font-family: var(--sans, inherit);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0;
+  box-sizing: border-box;
 }
-
-.brand .logo svg { width: 100%; height: 100%; }
 
 .brand .bname {
   font-size: 14.5px;

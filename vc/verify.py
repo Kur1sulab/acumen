@@ -7,7 +7,7 @@
 
 复验为什么是「重跑引擎」而不是自己发请求
     ① Python 侧出站被 tools/check_offline.py 拦着（标准库的出站模块一律禁用），
-       这是产品纪律：鉴微自身不联网，扫描动作全部由本地引擎完成；
+       这是产品纪律：空境自身不联网，扫描动作全部由本地引擎完成；
     ② 引擎自己带 soft-404 基线和 digest 二次确认，重跑一遍比手拼一次请求更可信；
     ③ 复验要和首次扫描走同一条代码路径，否则「变了」到底是目标变了还是工具变了，
        分不清。
@@ -249,7 +249,7 @@ def _fresh_note(items: List[Dict[str, Any]], want: str) -> str:
 
 def run_group(engine: str, plan: Dict[str, Any], timeout: int) -> Dict[str, Any]:
     """跑一组（一个模式 × 一个目标），只看结果不下结论。"""
-    tmp = tempfile.mkdtemp(prefix="acumen-verify-")
+    tmp = tempfile.mkdtemp(prefix="kara-verify-")
     out = {"kinds": set(), "items": [], "error": "", "elapsed": 0.0, "note": ""}
     t0 = time.time()
     try:
@@ -316,7 +316,7 @@ class Verifier:
         with self._lock:
             self._st = {"running": True, "total": len(rows), "done": 0, "current": "准备重跑…",
                         "started": time.time(), "finished": 0.0, "summary": {}, "last": []}
-        self._thread = threading.Thread(target=self._run, args=(rows,), name="acumen-verify", daemon=True)
+        self._thread = threading.Thread(target=self._run, args=(rows,), name="kara-verify", daemon=True)
         self._thread.start()
         return {"ok": True, "queued": len(rows)}
 

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>鉴微 · 本地漏扫</title>
+<title>空境 · 本地漏扫</title>
 <link rel="stylesheet" href="/ui/style.css">
 </head>
 <body>
@@ -11,8 +11,8 @@
   <!-- ============ 侧栏：分组导航 ============ -->
   <aside class="sidebar">
     <div class="brand">
-      <span class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.6L19.8 17.2H4.2L12 3.6z"/><path d="M1.8 12.6h5.4M16.8 12.6h5.4"/><path d="M12 8.4v3.2"/></svg></span>
-      <span class="bname">鉴微</span>
+      <span class="logo" aria-hidden="true">空</span>
+      <span class="bname">空境</span>
       <span class="bver" id="appVer" hidden></span>
     </div>
 
@@ -72,7 +72,7 @@
   <!-- ============ 主区 ============ -->
   <main class="main">
     <header class="topbar">
-      <div class="crumb">鉴微 <span class="sep" aria-hidden="true">/</span> <b id="crumbNow">漏洞管理</b></div>
+      <div class="crumb">空境 <span class="sep" aria-hidden="true">/</span> <b id="crumbNow">漏洞管理</b></div>
       <div class="top-actions">
         <span class="top-meta" id="topMeta"></span>
         <button id="btnRescan" class="btn primary" title="增量摄入：只解析新增或改动的文件">整理数据</button>
@@ -84,7 +84,7 @@
 
     <div class="page" id="pageRoot" data-view="findings">
       <div class="page-head">
-        <h1><span id="pageTitle">鉴微</span> <span class="code" id="pageCode">/VULN</span></h1>
+        <h1><span id="pageTitle">空境</span> <span class="code" id="pageCode">/VULN</span></h1>
         <p id="pageDesc">查看和管理所有扫描发现的漏洞</p>
       </div>
 

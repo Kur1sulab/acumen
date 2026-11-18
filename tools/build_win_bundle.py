@@ -44,7 +44,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from vc import __version__ as VERSION  # noqa: E402
 
-BUNDLE = f"acumen-{VERSION}-win64"
+BUNDLE = f"kara-{VERSION}-win64"
 
 BAT = r"""@echo off
 setlocal
@@ -60,12 +60,12 @@ rem 包内引擎：找到就显式指给后端，免得机器上另有一个旧 
 if exist "engine\sweep.exe" set "VC_RECON_BIN=%CD%\engine\sweep.exe"
 
 echo.
-echo   鉴微 Acumen  v{ver}
+echo   空境 Kara  v{ver}
 echo   ---------------------------------------------
 echo   本地漏扫 · 自带引擎 · 只监听 127.0.0.1 · 不联网
 echo.
 echo   启动后浏览器会自动打开，在「扫描」页填目标就能开扫。
-echo   关掉这个窗口即停止服务。换端口：acumen.bat --port 7799
+echo   关掉这个窗口即停止服务。换端口：kara.bat --port 7799
 echo.
 
 "python\python.exe" -m vc.server --port 7788 --open %*
@@ -73,7 +73,7 @@ set "RC=%ERRORLEVEL%"
 
 if not "%RC%"=="0" goto :crashed
 echo.
-echo   [acumen] 已停止。
+echo   [kara] 已停止。
 timeout /t 3 >nul 2>&1
 goto :eof
 
@@ -92,7 +92,7 @@ echo.
 pause
 """
 
-README = r"""鉴微 Acumen v{ver} —— Windows 绿色版
+README = r"""空境 Kara v{ver} —— Windows 绿色版
 ================================================
 
 小而精的本地漏扫。解压即用：不需要安装 Python，不需要 pip，不需要联网，
@@ -103,7 +103,7 @@ README = r"""鉴微 Acumen v{ver} —— Windows 绿色版
 1. 把整个压缩包解压到一个有写权限的目录
    （桌面、D 盘、U 盘都行；务必完整解压，别在压缩包里直接双击）
 
-2. 双击 acumen.bat
+2. 双击 kara.bat
 
 3. 浏览器自动打开 http://127.0.0.1:7788/
    没自动开就手动输入这个地址
@@ -116,7 +116,7 @@ README = r"""鉴微 Acumen v{ver} —— Windows 绿色版
 
 目录说明
 --------
-acumen.bat              启动器，双击这个
+kara.bat              启动器，双击这个
 START-HERE.txt          就是你正在读的这份说明
 engine\sweep.exe        扫描引擎（全流程 / 端口 / 指纹 / API / JS / 路径 / 子域 / 基线）
 python\                 内置 Python 3.12.8 运行时（约 25MB），不用管
@@ -129,7 +129,7 @@ CHANGELOG.md            版本更新记录
 --------
 · 只监听 127.0.0.1，同网段其它机器访问不到
 · 不发起任何外部网络请求，没有遥测、没有上报
-· 数据全部存本机：%USERPROFILE%\.acumen\vuln.db
+· 数据全部存本机：%USERPROFILE%\.kara\vuln.db
 · 收件箱默认扫 %USERPROFILE%\pentest-inbox 等目录
 
 常见问题
@@ -144,7 +144,7 @@ Q: 杀软提示风险
 A: Python 官方绿色版运行时的固有误报，程序本身没有网络行为。
 
 Q: 想换端口
-A: acumen.bat --port 7799
+A: kara.bat --port 7799
 
 Q: 想确认包是好的
 A: 在解压目录执行：
@@ -258,11 +258,11 @@ def assemble(python_zip: Path, build_dir: Path, engine_exe: Path) -> Path:
     eprint(f"      engine/sweep.exe  {engine_exe.stat().st_size:,} 字节")
 
     eprint("[5/7] 生成启动器（GBK + CRLF）")
-    (stage / "acumen.bat").write_bytes(
+    (stage / "kara.bat").write_bytes(
         BAT.replace("{ver}", VERSION).replace("\n", "\r\n").encode("gbk"))
     (stage / "START-HERE.txt").write_bytes(
         README.replace("{ver}", VERSION).replace("\n", "\r\n").encode("gbk"))
-    eprint("      acumen.bat / START-HERE.txt")
+    eprint("      kara.bat / START-HERE.txt")
 
     eprint("[6/7] 打包")
     out_zip = build_dir / f"{BUNDLE}.zip"
@@ -276,7 +276,7 @@ def assemble(python_zip: Path, build_dir: Path, engine_exe: Path) -> Path:
                 if fn.endswith(".pyc"):
                     continue
                 fp = Path(root) / fn
-                # 压缩包内套一层同名目录：用户解压时得到一个完整的 acumen-x.y.z-win64/，
+                # 压缩包内套一层同名目录：用户解压时得到一个完整的 kara-x.y.z-win64/，
                 # 而不是把一堆文件撒进他当前的下载文件夹。
                 z.write(fp, Path(BUNDLE) / fp.relative_to(stage))
                 count += 1
@@ -288,7 +288,7 @@ def assemble(python_zip: Path, build_dir: Path, engine_exe: Path) -> Path:
         def _p(rel: str) -> str:
             return f"{BUNDLE}/{rel}"
 
-        for must in ("acumen.bat", "python/python.exe", "python/python312._pth",
+        for must in ("kara.bat", "python/python.exe", "python/python312._pth",
                      "python/_sqlite3.pyd", "vc/server.py", "vc/parsers_sweep.py",
                      "tests/smoke_bundle.py", "START-HERE.txt", "engine/sweep.exe"):
             if _p(must) not in got:
@@ -305,13 +305,13 @@ def assemble(python_zip: Path, build_dir: Path, engine_exe: Path) -> Path:
                    if l.strip() and not l.startswith("#")]
         if ".." not in entries:
             problems.append("._pth 里没有 ..（import vc 会失败）")
-        bat = z.read(_p("acumen.bat"))
+        bat = z.read(_p("kara.bat"))
         if bat.count(b"\r\n") == 0 or bat.count(b"\n") != bat.count(b"\r\n"):
-            problems.append("acumen.bat 换行不是纯 CRLF")
+            problems.append("kara.bat 换行不是纯 CRLF")
         try:
             bat.decode("gbk")
         except UnicodeDecodeError:
-            problems.append("acumen.bat 不是 GBK 可解码")
+            problems.append("kara.bat 不是 GBK 可解码")
     if problems:
         for pb in problems:
             eprint(f"      [X] {pb}")
@@ -327,7 +327,7 @@ def _default_engine() -> Path | None:
     引擎是 Go 交叉编译产物，不该进 git；放 build/ 下由 .gitignore 兜住，
     构建脚本只负责「有就用、没有就明确报错」。
     """
-    for c in (os.environ.get("ACUMEN_ENGINE", ""),
+    for c in (os.environ.get("KARA_ENGINE", ""),
               ROOT / "build" / "sweep-win64.exe",
               ROOT / "dist" / "sweep-win64.exe"):
         if not c:
@@ -359,7 +359,7 @@ def main() -> int:
     out_dir = (ROOT / args.out).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    eprint(f"鉴微 Acumen v{VERSION} · Windows 绿色版构建")
+    eprint(f"空境 Kara v{VERSION} · Windows 绿色版构建")
     eprint(f"运行时 : {py_zip}")
     eprint(f"引擎   : {engine}")
     eprint(f"输出   : {out_dir}")
@@ -374,7 +374,7 @@ def main() -> int:
     eprint("")
     eprint("下一步（必须在真 Windows 上做，结构对不等于能跑）：")
     eprint(f"      解压 {z.name} 后执行 python\\python.exe tests\\smoke_bundle.py")
-    eprint("      再双击 acumen.bat，确认「扫描」页底部显示 engine\\sweep.exe 已就绪")
+    eprint("      再双击 kara.bat，确认「扫描」页底部显示 engine\\sweep.exe 已就绪")
     return 0
 
 
