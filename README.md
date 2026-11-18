@@ -1,4 +1,4 @@
-# 漏扫控制台 · Vuln Console
+# 鉴微 · Acumen
 
 把散在各处的漏扫产物（nuclei / xray / nmap / nessus / yakit / 报告 Markdown / CSV）自动收进一个本地看板：
 **打开页面就自动整理**——扫描收件箱、归一化、去重合并、按严重度与资产聚合，可筛选、改状态、导 CSV / MD。
@@ -20,7 +20,7 @@
 ## 跑起来
 
 ```bash
-cd ~/tools/vuln-console
+cd ~/tools/acumen
 ./run.sh                 # 默认 127.0.0.1:7788，自动开浏览器
 ./run.sh --port 7799     # 换端口
 ```
@@ -92,7 +92,7 @@ CSV 带 BOM（Excel 直接开不乱码），MD 按严重度分组带汇总表头
 ## 数据在哪
 
 ```
-~/.vuln-console/vuln.db        # SQLite：findings / assets / files / log
+~/.acumen/vuln.db        # SQLite：findings / assets / files / log
 ```
 
 删了就是清空重来（不会动原始产物文件）。

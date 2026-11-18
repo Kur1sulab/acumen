@@ -1,4 +1,4 @@
-/* 漏扫控制台 · 界面（照「天穹」式后台排版组织：浅灰侧栏 + 纯白主区 + 靛蓝强调）
+/* 鉴微 · 界面（照「天穹」式后台排版组织：浅灰侧栏 + 纯白主区 + 靛蓝强调）
  *
  * 结构层：左 178px 分组导航 / 顶 50px 面包屑工具条 / 主区纵向流水
  *        （标题 → 六联统计 → 状态分段 → 搜索筛选 → 表格 → 底部计数）
@@ -433,7 +433,8 @@ a { color: inherit; }
   display: flex;
   flex-direction: column;
   padding: 0 20px;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .page-head { flex: none; padding: 18px 0 15px; }
@@ -882,7 +883,7 @@ a { color: inherit; }
 
 .panel {
   flex: 1 1 auto;
-  min-height: 0;
+  min-height: 240px;
   display: flex;
   flex-direction: column;
   overflow: hidden;

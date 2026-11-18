@@ -1,4 +1,4 @@
-"""漏扫控制台单测：解析器逐格式 + 存储层去重合并 + 端到端摄入。
+"""鉴微单测：解析器逐格式 + 存储层去重合并 + 端到端摄入。
 
 跑法：python3 -m pytest tests/ -q   或   python3 -m unittest discover -s tests -v
 （零依赖：pytest 不在时用 unittest 也能跑）

@@ -1,4 +1,4 @@
-"""漏扫控制台 · 本地 Web 服务（stdlib 零依赖）
+"""鉴微 · Acumen —— 本地 Web 服务（stdlib 零依赖）
 
 用法：
     python3 -m vc.server --inbox ~/pentest --inbox ~/pentest-inbox --port 7788 --open
@@ -271,12 +271,12 @@ def build(inboxes: List[str], db_path: str, watch: bool = True) -> ThreadingHTTP
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    ap = argparse.ArgumentParser(description="漏扫控制台 · 本地 Web（零依赖）")
+    ap = argparse.ArgumentParser(description="鉴微 · Acumen —— 本地 Web（零依赖）")
     ap.add_argument("--inbox", action="append", default=None,
                     help=f"收件箱目录，可重复；默认 {DEFAULT_INBOXES}")
     ap.add_argument("--port", type=int, default=7788)
     ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--db", default=os.path.expanduser("~/.vuln-console/vuln.db"))
+    ap.add_argument("--db", default=os.path.expanduser("~/.acumen/vuln.db"))
     ap.add_argument("--open", action="store_true", help="启动后自动打开浏览器")
     ap.add_argument("--no-watch", action="store_true", help="关闭后台自动摄入")
     ap.add_argument("--scan", action="store_true", help="只在命令行跑一次摄入然后退出")
@@ -317,20 +317,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     url = f"http://{args.host}:{args.port}/"
     STATE.store.log("info", f"服务启动：{url}　收件箱：{', '.join(STATE.ingestor.inboxes)}")
-    print(f"[vuln-console] {url}")
-    print(f"[vuln-console] 收件箱: {', '.join(STATE.ingestor.inboxes)}")
-    print(f"[vuln-console] 数据库: {args.db}")
+    print(f"[acumen] {url}")
+    print(f"[acumen] 收件箱: {', '.join(STATE.ingestor.inboxes)}")
+    print(f"[acumen] 数据库: {args.db}")
     if STATE.scans:
         if STATE.scans.engine:
-            print(f"[vuln-console] 扫描引擎: {STATE.scans.engine}")
+            print(f"[acumen] 扫描引擎: {STATE.scans.engine}")
         else:
-            print("[vuln-console] 扫描引擎: 未找到 recon-go —— 界面里扫描按钮会提示构建命令")
+            print("[acumen] 扫描引擎: 未找到 recon-go —— 界面里扫描按钮会提示构建命令")
     if args.open:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
-        print("\n[vuln-console] 收工")
+        print("\n[acumen] 收工")
     finally:
         STATE.stop.set()
         if STATE.scans:

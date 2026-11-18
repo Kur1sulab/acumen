@@ -1,4 +1,4 @@
-/* 漏扫控制台 · 前端逻辑（无框架、无构建步骤） */
+/* 鉴微 · 前端逻辑（无框架、无构建步骤） */
 (() => {
   const $ = (sel) => document.querySelector(sel);
   const state = {
@@ -102,11 +102,11 @@
     if (root) root.dataset.view = state.tab || 'findings';
     const m = VIEW_META[state.tab] || VIEW_META.findings;
     const t = $('#pageTitle'), c = $('#pageCode'), d = $('#pageDesc'), cr = $('#crumbNow');
-    if (t) t.textContent = '漏扫控制台';
+    if (t) t.textContent = '鉴微';
     if (c) c.textContent = m[1];
     if (d) d.textContent = m[0] + ' · ' + m[2];
     if (cr) cr.textContent = m[0];
-    document.title = '漏扫控制台 · Vuln Console';
+    document.title = '鉴微 · Acumen';
   }
 
   // 状态分段与筛选下拉必须同源，否则会出现「上面写着待审查、下拉却是全部」的自相矛盾
