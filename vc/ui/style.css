@@ -1262,9 +1262,12 @@ a { color: inherit; }
   transition: color 0.15s;
 }
 .acard-sub {
-  display: flex; align-items: center; gap: 5px; min-width: 0;
-  font-family: var(--mono); font-size: 10.5px; color: var(--faint);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  /* 技术栈经常一长串（tomcat · nginx · zyxel…），单行 ellipsis 会把大半截掉，
+     改成最多两行、超出才截；完整值在 title 里 */
+  min-width: 0; overflow-wrap: anywhere;
+  font-family: var(--mono); font-size: 10.5px; line-height: 1.5; color: var(--faint);
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow: hidden;
 }
 .acard-sub .sep { opacity: 0.5; }
 .acard-title.hint { color: var(--muted); }
@@ -1281,6 +1284,7 @@ a { color: inherit; }
 .pchips { display: flex; flex-wrap: wrap; gap: 5px; }
 .pchip {
   display: inline-flex; align-items: center; gap: 5px;
+  max-width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
   font-family: var(--mono); font-size: 10.5px; line-height: 1;
   padding: 4px 8px; border-radius: 999px;
   background: var(--fill-2); border: 1px solid var(--line); color: var(--ep);
@@ -1288,6 +1292,9 @@ a { color: inherit; }
 .pchip i { width: 5px; height: 5px; border-radius: 50%; background: var(--dot, var(--faint)); flex: 0 0 auto; }
 .pchip.more { background: transparent; border-style: dashed; color: var(--muted); }
 .acard-nop { font-size: 11px; color: var(--faint); }
+
+/* 整列空值的列自动收起（见 loadFindings 里的 anyUrl 判断） */
+#view-findings table.hide-url .w-url { display: none; }
 
 .mixbar {
   display: flex; gap: 1px; height: 4px; border-radius: 99px; overflow: hidden;
@@ -1352,8 +1359,11 @@ a { color: inherit; }
   white-space: nowrap;
 }
 .modebtn .mh {
+  /* 模式说明两行内说完，单行会把"子域→验活→资产→备案…"直接截断 */
   font-family: var(--mono); font-size: 9.5px; font-weight: 400; color: var(--faint);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
+  max-width: 100%; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow: hidden;
 }
 .modebtn.on {
   background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent);

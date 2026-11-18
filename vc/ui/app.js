@@ -72,7 +72,6 @@
     return [s.findings, s.hits, s.assets, s.files, JSON.stringify(s.severity), s.last_scan].join('|');
   }
 
-  const SEV_CN = { critical: '严重', high: '高危', medium: '中危', low: '低危', info: '信息' };
 
   const SEV_ICON = {
     high: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.6l8.8 15.6H3.2L12 3.6z"/><path d="M12 10v4.3M12 17.1h.01"/></svg>',
@@ -180,7 +179,7 @@
     }
 
     const ls = $('#lastScan');
-    if (ls) ls.textContent = s.last_scan ? ('最近整理 ' + s.last_scan) : '尚未整理';
+    if (ls) { const txt = s.last_scan ? ('最近整理 ' + s.last_scan) : '尚未整理'; ls.textContent = txt; ls.title = txt; }
 
     setN('tabN-findings', s.findings);
     setN('tabN-assets', s.assets);
@@ -220,7 +219,7 @@
       <td class="mono src-cell">${esc(r.sources)}</td>
       <td><div class="title-cell" title="${esc(r.title)}">${esc(r.title)}</div>${evTitle}</td>
       <td class="asset-cell">${r.asset ? esc(r.asset) : (srcHint ? '' : '<span class="muted">—</span>')}${r.port ? `<div class="par">:${esc(r.port)}</div>` : ''}${srcHint}</td>
-      <td>${url ? `<div class="ep" title="${esc(url)}">${esc(url)}</div>` : '<span class="muted">—</span>'}${par}</td>
+      <td class="w-url">${url ? `<div class="ep" title="${esc(url)}">${esc(url)}</div>` : '<span class="muted">—</span>'}${par}</td>
       <td class="mono nowrap" style="text-align:right">${r.count}</td>
       <td class="mono muted nowrap">${esc((r.first_seen || '').slice(0, 16))}</td>
     </tr>`;
@@ -234,9 +233,13 @@
     const data = await api('/api/findings?' + qs.toString());
     state.total = data.total;
     const rows = data.rows || [];
+    // 整列都是「—」的表格纯粹是噪声：这一页数据没有资产/端点时，直接把 URL 列收起来
+    const anyUrl = rows.some((r) => r.asset || r.endpoint || r.param);
+    const tbl = document.querySelector('#view-findings table');
+    if (tbl) tbl.classList.toggle('hide-url', !anyUrl);
     $('#findingsBody').innerHTML = rows.length
       ? rows.map(rowHtml).join('')
-      : `<tr><td colspan="9" class="muted center">没有匹配记录${state.q || state.sev || state.status ? '（试试清空筛选）' : ''}</td></tr>`;
+      : `<tr><td colspan="${anyUrl ? 9 : 8}" class="muted center">没有匹配记录${state.q || state.sev || state.status ? '（试试清空筛选）' : ''}</td></tr>`;
     const from = state.total === 0 ? 0 : state.offset + 1;
     $('#pageInfo').textContent = `${from}–${Math.min(state.offset + rows.length, state.total)} / 共 ${state.total}`;
     $('#prevPage').disabled = state.offset <= 0;
@@ -292,25 +295,36 @@
     return String(ts).slice(0, 10);
   }
 
+  const SEV_CN = { critical: '严重', high: '高危', medium: '中危', low: '低危', info: '信息' };
+  // 长服务名（TLS 证书 CN 抓下来的随机串）必须截断，否则撑破 pill 和卡片
+  function svcShort(s, n = 16) {
+    s = String(s || '');
+    return s.length > n ? s.slice(0, n) + '…' : s;
+  }
+
   function assetCard(a) {
     const ports = a.ports || [];
     const mix = a.sev_mix || {};
     const top = a.top_sev || '';
-    const badge = top ? `<span class="sev ${esc(top)}">${esc(top)}${a.n_find > 1 ? ' ×' + a.n_find : ''}</span>` : '';
+    const badge = top
+      ? `<span class="sev ${esc(top)}" title="${esc(SEV_CN[top] || top)}${a.n_find ? ' · ' + a.n_find + ' 条漏洞' : ''}">${esc(SEV_CN[top] || top)}${a.n_find > 1 ? ' ×' + a.n_find : ''}</span>`
+      : '';
     const svcLine = String(a.services || '').split(',').filter(Boolean).slice(0, 3)
       .map((s) => s.split('/').filter((x) => x && x !== 'conn_keepalive' && x !== 'tcp').pop() || s).join(' · ');
     const maxChips = 5;
     const chips = ports.slice(0, maxChips).map((p) => {
       const svc = String(p.service || p.proto || '').split('/').filter((x) => x && x !== 'conn_keepalive').pop() || '';
       const tip = [a.host + ':' + p.port, p.proto, p.service, p.title].filter(Boolean).join(' · ');
-      return `<span class="pchip" style="--dot:${dotFor(svc)}" title="${esc(tip)}"><i></i>${esc(p.port)}${svc && svc !== 'tcp' ? ' · ' + esc(svc) : ''}</span>`;
+      return `<span class="pchip" style="--dot:${dotFor(svc)}" title="${esc(tip)}"><i></i>${esc(p.port)}${svc && svc !== 'tcp' ? ' · ' + esc(svcShort(svc)) : ''}</span>`;
     }).join('');
     const more = ports.length > maxChips ? `<span class="pchip more">+${ports.length - maxChips}</span>` : '';
     const bar = ['critical', 'high', 'medium', 'low', 'info'].filter((k) => mix[k])
-      .map((k) => `<span style="flex:${mix[k]};background:${SEV_VAR[k]}" title="${k} ${mix[k]}"></span>`).join('');
+      .map((k) => `<span style="flex:${mix[k]};background:${SEV_VAR[k]}" title="${esc(SEV_CN[k] || k)} ${mix[k]} 条"></span>`).join('');
+    // pill 已经把每个端口的服务显示出来了，sub 再列一遍服务名纯属重复；
+    // 只有在没有端口信息时，才拿 services 兜底
     const sub = [];
     if (a.ip && a.ip !== a.host) sub.push(esc(a.ip));
-    if (svcLine) sub.push(esc(svcLine));
+    if (!ports.length && svcLine) sub.push(esc(svcLine));
     // 标题：扫描器的 title 常是「A|B|A」这种拼接，去重压成一行；没有 title 就用最高等级那条漏洞名
     const rawTitle = String(a.title || '').split('|').map((s) => s.trim()).filter(Boolean);
     const uniqTitle = [...new Set(rawTitle)].slice(0, 2).join(' · ');
@@ -325,7 +339,7 @@
         <div class="acard-host" title="${esc(a.host)}">${esc(a.host)}</div>
         ${badge}
       </div>
-      ${sub.length ? `<div class="acard-sub">${sub.join('<span class="sep" aria-hidden="true">·</span>')}</div>` : ''}
+      ${sub.length ? `<div class="acard-sub" title="${sub.join(' · ')}">${sub.join('<span class="sep" aria-hidden="true">·</span>')}</div>` : ''}
       ${title}
       ${ports.length ? `<div class="pchips">${chips}${more}</div>` : '<div class="acard-nop">没有端口信息</div>'}
       ${bar ? `<div class="mixbar">${bar}</div>` : ''}
@@ -374,7 +388,7 @@
     $('#filesCount').textContent = `${rows.length} 个文件${state.filesOnly ? '（有产出）' : ''}`;
     $('#filesOnly').classList.toggle('on', !!state.filesOnly);
     $('#filesBody').innerHTML = rows.length ? rows.map((f) => `<tr>
-      <td class="ep">${esc(f.path.replace(/^.*\/(pentest|pentest-assets|pentest-inbox)\//, '$1/'))}</td>
+      <td class="ep" title="${esc(f.path)}">${esc(f.path.replace(/^.*\/(pentest|pentest-assets|pentest-inbox)\//, '$1/'))}</td>
       <td class="mono">${esc(f.fmt)}</td>
       <td class="mono" style="text-align:right">${f.findings || 0}</td>
       <td class="mono" style="text-align:right">${f.assets || 0}</td>
