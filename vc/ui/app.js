@@ -1032,6 +1032,20 @@
     }, 4000);
   }
 
+  // 版本号一律来自后端 /api/version（源头是 vc/__init__.py 的 __version__），
+  // 前端不写死，避免升级时两处漂移。
+  async function loadVersion() {
+    try {
+      const info = await api('/api/version');
+      const el = $('#appVer');
+      if (el && info && info.version) {
+        el.textContent = 'v' + info.version;
+        el.title = '鉴微 · Acumen v' + info.version;
+        el.hidden = false;
+      }
+    } catch (e) { /* 旧后端没有该接口时静默跳过 */ }
+  }
+
   async function boot() {
     try { applyTheme(localStorage.getItem(THEME_KEY) || 'light'); } catch (e) { applyTheme('light'); }
     try {
@@ -1039,6 +1053,7 @@
       if (saved) scan.mode = saved;
     } catch (e) { /* 隐私模式忽略 */ }
     bind();
+    loadVersion();    // 版本号（后端注入）
     loadScanMeta();   // 引擎探测放后台，不挡首屏
     try {
       await rescan(false, true); // 打开即自动整理（静默）

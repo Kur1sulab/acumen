@@ -38,7 +38,12 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSION = "1.1.0"
+
+# 版本号唯一真源 = vc/__init__.py 的 __version__。这里不另写一份，
+# 否则改版本要动两处、迟早漂移（__init__ 里升了、产物名还是旧的）。
+sys.path.insert(0, str(ROOT))
+from vc import __version__ as VERSION  # noqa: E402
+
 BUNDLE = f"acumen-{VERSION}-win64"
 
 BAT = r"""@echo off

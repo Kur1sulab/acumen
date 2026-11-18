@@ -30,10 +30,12 @@ if __package__ in (None, ""):  # 允许 `python3 vc/server.py` 直接跑
     from vc.ingest import Ingestor
     from vc.scans import MODES as SCAN_MODES, ScanError, ScanManager
     from vc.store import Store, STATUS_CHOICES
+    from vc import __version__
 else:
     from .ingest import Ingestor
     from .scans import MODES as SCAN_MODES, ScanError, ScanManager
     from .store import Store, STATUS_CHOICES
+    from . import __version__
 
 UI_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui")
 DEFAULT_INBOXES = ["~/pentest-inbox", "~/pentest", "~/pentest-assets"]
@@ -170,6 +172,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not detail:
                     return self._err(404, f"任务 #{jid} 不存在")
                 return self._json(detail)
+            if path == "/api/version":
+                return self._json({"ok": True, "version": __version__, "name": "鉴微 · Acumen"})
             if path == "/api/health":
                 return self._json({"ok": True, "ts": time.time()})
             if path.startswith("/ui/"):
