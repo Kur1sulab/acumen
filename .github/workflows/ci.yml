@@ -34,6 +34,17 @@ jobs:
       - name: 全部 import 必须来自标准库
         run: python tools/check_zero_deps.py
 
+  offline:
+    name: 离网自检（无出站能力）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 不得存在出站模块 / 外部资源引用 / 下载命令
+        run: python tools/check_offline.py
+
   frontend:
     name: 前端零构建自检
     runs-on: ubuntu-latest
