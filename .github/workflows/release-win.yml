@@ -77,13 +77,14 @@ jobs:
           if (-not $zip) { throw "没有产出 zip" }
           Write-Host "交付物: $($zip.Name)"
           Expand-Archive -Path $zip.FullName -DestinationPath smoke -Force
-          Write-Host "--- 解压结果 ---"
+          Write-Host "--- 解压结果（包内带顶层目录 kara-<版本>-win64）---"
           Get-ChildItem smoke | Select-Object Name, Length | Format-Table -AutoSize
 
       - name: 解释器与模块自检
         shell: pwsh
-        working-directory: smoke
         run: |
+          Set-Location (Get-ChildItem smoke -Directory | Select-Object -First 1).FullName
+          Write-Host "--- 当前目录 $(Get-Location) ---"
           Write-Host "--- 包内解释器 ---"
           .\python\python.exe -c "import sys; print(sys.version); print(sys.executable)"
           Write-Host "--- 模块导入（验证 ._pth 的 .. 生效）---"
@@ -91,13 +92,14 @@ jobs:
 
       - name: 端到端冒烟（包内解释器真跑 CLI）
         shell: pwsh
-        working-directory: smoke
-        run: .\python\python.exe tests\smoke_bundle.py
+        run: |
+          Set-Location (Get-ChildItem smoke -Directory | Select-Object -First 1).FullName
+          .\python\python.exe tests\smoke_bundle.py
 
       - name: 真跑 kara.bat
         shell: pwsh
-        working-directory: smoke
         run: |
+          Set-Location (Get-ChildItem smoke -Directory | Select-Object -First 1).FullName
           $out = cmd.exe /c "kara.bat" 2>&1 | Out-String
           Write-Host $out
           if ($LASTEXITCODE -ne 0) { throw "kara.bat 退出码 $LASTEXITCODE" }
