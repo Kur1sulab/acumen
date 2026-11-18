@@ -88,11 +88,8 @@ def main() -> int:
     env["PYTHONDONTWRITEBYTECODE"] = "1"
 
     cmd = [
-        sys.executable, "-m", "vc.server",
-        "--port", str(port),
-        "--host", "127.0.0.1",
+        sys.executable, "-m", "vc.cli",
         "--db", db,
-        "--no-watch",
     ]
 
     print("=" * 62)

@@ -43,6 +43,7 @@ const helpText = `sweep — 空境 Kara 的扫描内核（Go 单文件，仅限�
   sweep fingerprint -u https://example.com
   sweep paths -u https://example.com   # 敏感路径探测（软 404 基线过滤）
   sweep baseline -d example.com [--checks secheaders,webfiles]  # 暴露面基线 8 检查
+  sweep strike -t http://example.com [--intensity normal] [--ports top100]  # 深度验证（真发请求）
   sweep poc -t https://example.com -p pocs/example.yaml  # YAML POC 引擎
   sweep patchdiff -r /path/to/repo [--commit SHA|--range A..B] [--limit N] [--emit-rule f.yaml]
                                          # 补丁差分 → 变种狩猎（本地 git 仓库，零外联）
@@ -76,6 +77,7 @@ var knownCmds = map[string]bool{
 	"icp": true, "api": true, "fingerprint": true, "paths": true, "jsintel": true,
 	"portscan": true, "poc": true, "patchdiff": true, "report": true,
 	"baseline": true, // 域名暴露面基线（report §5.9；桌面第二子进程，非 Python yata.py 对齐项）
+	"strike": true,   // 深度验证（内建 litmus 内核，非只读模式的延伸）
 	"version":  true, // 版本自省（Go 侧独有，Python yata.py 无对应子命令）
 }
 
@@ -329,6 +331,9 @@ func dispatch(cmd string, rest []string) int {
 			return 1 // fix3：写盘失败 → fail 事件 + exit 1
 		}
 		return 0
+
+	case "strike": // 深度验证：内建 litmus 内核，产物 out/<target>/strike/ 由 Kara 解析入账
+		return runStrike(rest, cmd)
 
 	case "poc": // yata.py:198-199：poc -t/--target -p/--poc
 		fs := newFlagSet()

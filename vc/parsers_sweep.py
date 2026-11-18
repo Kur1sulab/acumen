@@ -61,6 +61,12 @@ def _is_baseline(obj: Any) -> bool:
             and isinstance(obj.get("risks"), list))
 
 
+def _is_strike(obj: Any) -> bool:
+    """深度验证（内建 litmus 内核）的 findings.json：findings + coverage 双键。"""
+    return (isinstance(obj, dict) and isinstance(obj.get("findings"), list)
+            and isinstance(obj.get("coverage"), list))
+
+
 def _is_evidence(obj: Any) -> bool:
     """引擎取证目录里的 meta.json：命中点的复现材料。"""
     return (isinstance(obj, dict) and "url" in obj and "name" in obj
@@ -68,6 +74,7 @@ def _is_evidence(obj: Any) -> bool:
 
 
 _SNIFFERS = (
+    ("sweep_strike", _is_strike),
     ("sweep_paths", _is_paths),
     ("sweep_ports", _is_ports),
     ("sweep_api", _is_api),
@@ -182,6 +189,49 @@ def _path_sev(path: str) -> str:
 
 
 # ---------------------------------------------------------------- 各模式
+
+
+_SEV_OK = ("critical", "high", "medium", "low", "info")
+
+
+def parse_strike(obj: Dict[str, Any], host: str) -> ParseResult:
+    """深度验证结论入账。
+
+    与只读模式的差别就在 evidence 里那截 `[L2/confirmed]`：L1 只到「看得见」，
+    L2 才是「拿到了真实数据」，交付线看的是这个，不是标题吓不吓人。
+    """
+    findings, assets = [], []
+    items = [x for x in obj.get("findings") or [] if isinstance(x, dict)]
+    seen_hosts = set()
+    for it in items:
+        target = str(it.get("target") or "")
+        h = str(it.get("host") or "") or split_host_port(host)[0]
+        sev = str(it.get("severity") or "").lower()
+        level = str(it.get("level") or "")
+        conf = str(it.get("confidence") or "")
+        name = str(it.get("name") or it.get("check") or "深度验证发现")
+        findings.append(_mk_finding(
+            asset=h or host,
+            endpoint=target,
+            title=name,
+            sev=sev if sev in _SEV_OK else "info",
+            source=f"sweep-strike:{it.get('check') or ''}".rstrip(":"),
+            evidence=_ev(it.get("evidence"), f"[{level}/{conf}]" if (level or conf) else "",
+                         it.get("impact")),
+            repro=str(it.get("repro") or ""),
+            raw=json.dumps(it, ensure_ascii=False)[:1200],
+        ))
+        if h and h not in seen_hosts:
+            seen_hosts.add(h)
+            assets.append(_mk_asset(host=h, port=it.get("port") or "", source="sweep-strike"))
+
+    cov = [x for x in obj.get("coverage") or [] if isinstance(x, dict)]
+    skipped = [x for x in cov if str(x.get("state")) == "skip"]
+    if cov:
+        note = f"{len(items)} 条命中 · 覆盖 {len(cov) - len(skipped)} 项完成 / {len(skipped)} 项跳过"
+    else:
+        note = f"{len(items)} 条命中"
+    return ParseResult("sweep_strike", findings, assets, note=note)
 
 
 def parse_paths(obj: Dict[str, Any], host: str) -> ParseResult:
@@ -384,6 +434,7 @@ def parse_evidence(obj: Dict[str, Any], host: str) -> ParseResult:
 
 
 _PARSERS = {
+    "sweep_strike": parse_strike,
     "sweep_paths": parse_paths,
     "sweep_ports": parse_ports,
     "sweep_api": parse_api,

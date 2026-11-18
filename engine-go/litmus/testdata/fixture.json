@@ -1,0 +1,230 @@
+{
+  "run_id": 7,
+  "opts": {
+    "intensity": "normal",
+    "ports": "top1000",
+    "threads": 64
+  },
+  "elapsed": 12.5,
+  "findings": [
+    {
+      "id": "F-001",
+      "check": "smb_anon_shares",
+      "name": "SMB 匿名会话可枚举共享",
+      "severity": "critical",
+      "target": "10.0.0.5:445",
+      "host": "10.0.0.5",
+      "port": 445,
+      "scheme": "",
+      "category": "host",
+      "level": "L2",
+      "confidence": "confirmed",
+      "time": "2026-11-18T12:21:13+0800",
+      "evidence": "SMB2 NEGOTIATE -> Dialect 0x0210\nSESSION_SETUP(NTLM Type3 匿名) -> STATUS_SUCCESS\nIPC$ TREE_CONNECT -> STATUS_SUCCESS\nNetrShareEnum -> 12 项\n  DATA  | 可写 | 财务共享\n  HR    | 可读 | 人事档案",
+      "repro": "smbclient -N -L //10.0.0.5\npython3 poc/smb_anon_shares_10_0_0_5.py",
+      "impact": "未授权者可枚举全部共享名，并直接读取 HR 共享内的人事档案。",
+      "fix": "禁用匿名会话；关闭 SMB1；对共享启用最小权限 ACL。",
+      "cvss": "9.8",
+      "poc": "poc/smb_anon_shares_10_0_0_5.py",
+      "raw_ref": "evidence/F-001-smb.txt",
+      "extra": {
+        "rpc_shares": [
+          {
+            "name": "DATA",
+            "type": "disk",
+            "remark": "财务共享|可写"
+          },
+          {
+            "name": "HR",
+            "type": "disk",
+            "remark": "人事档案"
+          }
+        ]
+      },
+      "triage": {},
+      "title_en": "Anonymous SMB session allows share enumeration",
+      "creds_plain": [
+        {
+          "proto": "smb",
+          "host": "10.0.0.5",
+          "port": 445,
+          "user": "guest",
+          "secret": "TESTPASS123",
+          "kind": "password",
+          "source": "F-001",
+          "note": "匿名会话"
+        }
+      ]
+    },
+    {
+      "id": "F-002",
+      "check": "redis_noauth",
+      "name": "Redis 未授权访问",
+      "severity": "high",
+      "target": "10.0.0.9:6379",
+      "host": "10.0.0.9",
+      "port": 6379,
+      "scheme": "",
+      "category": "host",
+      "level": "L2",
+      "confidence": "confirmed",
+      "time": "2026-11-18T12:21:13+0800",
+      "evidence": "PING -> +PONG\nINFO server -> redis_version:6.2.6\nDBSIZE -> 14823",
+      "repro": "redis-cli -h 10.0.0.9 PING",
+      "impact": "可读取/覆盖全部键值，并可写 crontab 或 SSH 公钥获取系统权限。",
+      "fix": "绑定 127.0.0.1；设置 requirepass；禁止外网暴露 6379。",
+      "cvss": "8.6",
+      "poc": "",
+      "raw_ref": "",
+      "extra": {},
+      "triage": {},
+      "title_en": "Redis unauthenticated access",
+      "creds_plain": []
+    },
+    {
+      "id": "F-003",
+      "check": "tls_weak",
+      "name": "TLS 支持弱套件",
+      "severity": "medium",
+      "target": "10.0.0.12:443",
+      "host": "10.0.0.12",
+      "port": 443,
+      "scheme": "https",
+      "category": "web",
+      "level": "L1",
+      "confidence": "suspect",
+      "time": "2026-11-18T12:21:13+0800",
+      "evidence": "",
+      "repro": "",
+      "impact": "中间人可降级协商到 3DES。",
+      "fix": "禁用 3DES/RC4，启用 TLS1.2+。",
+      "cvss": "5.3",
+      "poc": "",
+      "raw_ref": "",
+      "extra": {},
+      "triage": {},
+      "title_en": "",
+      "creds_plain": []
+    },
+    {
+      "id": "F-004",
+      "check": "http_headers",
+      "name": "缺少安全响应头 <script> & \"引号\"",
+      "severity": "low",
+      "target": "https://10.0.0.12/",
+      "host": "10.0.0.12",
+      "port": 443,
+      "scheme": "https",
+      "category": "web",
+      "level": "L1",
+      "confidence": "confirmed",
+      "time": "2026-11-18T12:21:13+0800",
+      "evidence": "GET / HTTP/1.1\nHost: 10.0.0.12\n<无 Content-Security-Policy>",
+      "repro": "curl -skI https://10.0.0.12/",
+      "impact": "XSS 与点击劫持的缓解措施缺失。",
+      "fix": "下发 CSP / X-Frame-Options / X-Content-Type-Options。",
+      "cvss": "3.1",
+      "poc": "",
+      "raw_ref": "",
+      "extra": {},
+      "triage": {},
+      "title_en": "",
+      "creds_plain": []
+    },
+    {
+      "id": "F-005",
+      "check": "banner",
+      "name": "服务指纹识别",
+      "severity": "info",
+      "target": "10.0.0.20:22",
+      "host": "10.0.0.20",
+      "port": 22,
+      "scheme": "",
+      "category": "host",
+      "level": "L1",
+      "confidence": "confirmed",
+      "time": "2026-11-18T12:21:13+0800",
+      "evidence": "SSH-2.0-OpenSSH_8.2p1 Ubuntu-4ubuntu0.5",
+      "repro": "nc -v 10.0.0.20 22",
+      "impact": "版本信息暴露，便于针对性选型。",
+      "fix": "按需隐藏 banner。",
+      "cvss": "0.0",
+      "poc": "",
+      "raw_ref": "",
+      "extra": {},
+      "triage": {},
+      "title_en": "",
+      "creds_plain": []
+    }
+  ],
+  "coverage": [
+    {
+      "target": "10.0.0.5",
+      "category": "host",
+      "item": "smb_anon_shares",
+      "state": "ok",
+      "reason": "",
+      "count": 12,
+      "time": "2026-11-18T12:21:13+0800"
+    },
+    {
+      "target": "10.0.0.9",
+      "category": "host",
+      "item": "redis_noauth",
+      "state": "ok",
+      "reason": "",
+      "count": 1,
+      "time": "2026-11-18T12:21:13+0800"
+    },
+    {
+      "target": "10.0.0.12",
+      "category": "web",
+      "item": "nuclei_templates",
+      "state": "skip",
+      "reason": "目标返回 403，模板无法判断命中",
+      "count": 0,
+      "time": "2026-11-18T12:21:13+0800"
+    },
+    {
+      "target": "10.0.0.12",
+      "category": "web",
+      "item": "dir_bruteforce",
+      "state": "na",
+      "reason": "强度档位 normal 下不启用目录爆破",
+      "count": 0,
+      "time": "2026-11-18T12:21:13+0800"
+    },
+    {
+      "target": "10.0.0.20",
+      "category": "host",
+      "item": "smb_anon_shares",
+      "state": "na",
+      "reason": "22 端口未开放 SMB",
+      "count": 0,
+      "time": "2026-11-18T12:21:13+0800"
+    }
+  ],
+  "diff": {
+    "new": [
+      {
+        "id": "F-001",
+        "name": "SMB 匿名会话可枚举共享",
+        "target": "10.0.0.5:445"
+      }
+    ],
+    "still": [
+      {
+        "id": "F-002",
+        "name": "Redis 未授权访问",
+        "target": "10.0.0.9:6379"
+      }
+    ],
+    "fixed": [
+      {
+        "id": "F-000",
+        "name": "旧版 Redis 未授权",
+        "target": "10.0.0.7:6379"
+      }
+    ]
+  }
+}

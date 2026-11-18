@@ -62,6 +62,10 @@ MODES = {
         "label": "子域枚举", "sub": "subdomain", "flag": "-d", "kind": "domain", "expect": 1,
         "hint": "证书日志枚举子域（crt.sh → certspotter 兜底）",
     },
+    "strike": {
+        "label": "深度验证", "sub": "strike", "flag": "-t", "kind": "any", "expect": 1,
+        "hint": "内建验证内核：端口/服务真登/未授权/注入/敏感路径，判定到 L1/L2（真发请求）",
+    },
 }
 
 MAX_TARGETS = 64
@@ -73,7 +77,7 @@ ENGINE_HINT = ("未找到扫描引擎 sweep。\n"
                "  · 绿色版：确认包内 engine\\sweep.exe 还在（杀软有时会吞掉它）\n"
                "  · 源码目录：cd ~/tools/sweep/engine-go && "
                "go build -o ~/.local/bin/sweep ./cmd/atlas\n"
-               "  · 或手动指定：python3 -m vc.server --engine /path/to/sweep")
+               "  · 或手动指定：kara --engine /path/to/sweep …")
 
 
 class ScanError(Exception):
@@ -100,15 +104,15 @@ def _valid_target(t: str, kind: str) -> str:
         scheme, rest = t.split("://", 1)
         if scheme.lower() not in ("http", "https"):
             raise ScanError("只支持 http/https 目标")
-        if kind != "url":
+        if kind not in ("url", "any"):
             raise ScanError("该模式吃域名/IP，不要带 http:// 前缀")
         head = scheme.lower() + "://"
     else:
         rest = t
-    if kind == "url":
+    if kind in ("url", "any"):
         # 从浏览器地址栏复制来的 URL 几乎都带尾斜杠，那是合法目标，不该被拒收
         rest = rest.rstrip("/") or rest
-    allowed = _URL_CHARS if kind == "url" else _HOST_CHARS
+    allowed = _URL_CHARS if kind in ("url", "any") else _HOST_CHARS
     bad = sorted({c for c in rest if c not in allowed})
     if bad:
         raise ScanError("目标含非法字符：" + " ".join(repr(c) for c in bad[:4]))
@@ -116,6 +120,8 @@ def _valid_target(t: str, kind: str) -> str:
         raise ScanError("目标含 '..'（不允许路径穿越形状）")
     if rest.startswith((".", "-", "/")) or rest.endswith((".", "-", "/")):
         raise ScanError("目标不能以 . - / 开头或结尾")
+    if kind == "any":
+        return head + rest
     if kind == "url":
         return (head or "https://") + rest
     if kind == "domain" and ("[" in rest or ":" in rest):
@@ -216,11 +222,13 @@ class ScanManager:
     """
 
     def __init__(self, db_path: str, inbox_root: str, engine: str = "",
-                 timeout: int = DEFAULT_TIMEOUT, max_parallel: int = DEFAULT_PARALLEL,
+                 mode_args: Optional[list] = None, timeout: int = DEFAULT_TIMEOUT, max_parallel: int = DEFAULT_PARALLEL,
                  ingest_cb=None):
         self.db_path = db_path
         self.inbox_root = os.path.abspath(os.path.expanduser(inbox_root))
         self.engine = find_engine(engine)
+        # 深层模式（strike）要往引擎追加参数（--ports/--intensity…）；普通模式为空
+        self.mode_args = [str(a) for a in (mode_args or [])]
         self.timeout = max(30, int(timeout))
         self.max_parallel = max(1, min(MAX_PARALLEL, int(max_parallel)))
         self.ingest_cb = ingest_cb
@@ -487,6 +495,8 @@ class ScanManager:
         progress_path = os.path.join(job_dir, "progress", slug + ".jsonl")
         log_path = os.path.join(job_dir, "logs", slug + ".log")
         argv = [self.engine, "--progress-file", progress_path, spec["sub"], spec["flag"], target]
+        if spec["sub"] == "strike" and self.mode_args:
+            argv += self.mode_args
 
         with self._lock:
             self._live[run_id] = {"job_id": job_id, "target": target, "status": "running",

@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Litmus 渗透测试报告 · run 7</title>
+<style>
+:root{--bg:#0f1115;--card:#171a21;--line:#2a2f3a;--fg:#e6e8ee;--dim:#9aa3b2;
+--critical:#ff5d52;--high:#ff9f45;--medium:#ffd166;--low:#6ea8fe;--info:#9aa3b2;}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+font:15px/1.7 -apple-system,"PingFang SC","Microsoft YaHei",system-ui,sans-serif}
+.wrap{max-width:1080px;margin:0 auto;padding:32px 20px 80px}
+h1{font-size:26px;margin:0 0 6px}
+h2{font-size:20px;margin:38px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--line)}
+h3{font-size:17px;margin:26px 0 10px}
+h4{font-size:15px;margin:22px 0 8px}
+.meta{color:var(--dim);font-size:13px}
+.meta code{color:#cbd5e1}
+table{border-collapse:collapse;width:100%;margin:12px 0;font-size:14px}
+th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+th{background:#1d222b;font-weight:600}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;
+padding:16px 18px;margin:14px 0}
+.badge{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;
+font-weight:700;color:#111}
+.critical{background:var(--critical)}.high{background:var(--high)}
+.medium{background:var(--medium)}.low{background:var(--low)}.info{background:var(--info)}
+pre{background:#0b0d11;border:1px solid var(--line);border-radius:8px;padding:12px;
+overflow:auto;font:12.5px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;
+white-space:pre-wrap;word-break:break-word;color:#cfd6e4}
+.kv{color:var(--dim);font-size:13px;margin:2px 0}
+.kv b{color:var(--fg);font-weight:600}
+.muted{color:var(--dim)}
+.tag{font-size:12px;color:var(--dim);border:1px solid var(--line);
+border-radius:6px;padding:1px 6px;margin-left:6px}
+footer{margin-top:50px;color:var(--dim);font-size:12.5px;border-top:1px solid var(--line);padding-top:16px}
+@media print{body{background:#fff;color:#111}.card{background:#fff;border-color:#ddd}
+pre{background:#f6f7f9;color:#111}th{background:#eee}}
+</style></head><body><div class="wrap">
+<h1>Litmus 内网渗透测试报告</h1><div class="meta">运行编号 <code>7</code> · 生成时间 2026-11-18T12:21:13+0800 · 强度 <code>normal</code> （端口 top1000 / 并发 64） · 耗时 12.5s</div><h2>一、结论摘要</h2><div class="card"><table><tr><th>等级</th><th>数量</th></tr><tr><td><span class="badge critical">严重</span></td><td>1</td></tr><tr><td><span class="badge high">高危</span></td><td>1</td></tr><tr><td><span class="badge medium">中危</span></td><td>1</td></tr><tr><td><span class="badge low">低危</span></td><td>1</td></tr><tr><td><span class="badge info">信息</span></td><td>1</td></tr><tr><td><b>合计</b></td><td><b>5</b></td></tr></table></div><h2>二、覆盖情况（三态）</h2><div class="card">已测 <b>2</b> 项 · 未测 <b>1</b> 项 · 不适用 <b>2</b> 项</div><h3>未测项及原因</h3><table><tr><th>目标</th><th>类别</th><th>项目</th><th>原因</th></tr><tr><td>10.0.0.12</td><td>web</td><td>nuclei_templates</td><td>目标返回 403，模板无法判断命中</td></tr></table><h3>逐项清单（含已测）</h3><table><tr><th>目标</th><th>类别</th><th>检查项</th><th>状态</th><th>命中</th><th>说明</th></tr><tr><td>10.0.0.5</td><td>host</td><td>smb_anon_shares</td><td>ok</td><td>12</td><td>—</td></tr><tr><td>10.0.0.9</td><td>host</td><td>redis_noauth</td><td>ok</td><td>1</td><td>—</td></tr><tr><td>10.0.0.12</td><td>web</td><td>nuclei_templates</td><td>skip</td><td>0</td><td>目标返回 403，模板无法判断命中</td></tr><tr><td>10.0.0.12</td><td>web</td><td>dir_bruteforce</td><td>na</td><td>0</td><td>强度档位 normal 下不启用目录爆破</td></tr><tr><td>10.0.0.20</td><td>host</td><td>smb_anon_shares</td><td>na</td><td>0</td><td>22 端口未开放 SMB</td></tr></table><h2>三、漏洞明细（按等级分类）</h2><h3><span class='badge critical'>严重</span> 1 条</h3><div class="card"><h4>F-001 SMB 匿名会话可枚举共享<span class="tag">L2</span><span class="tag">confirmed</span></h4><div class="kv">目标 <b>10.0.0.5:445</b></div><div class="kv">时间 2026-11-18T12:21:13+0800</div><div class='kv'><b>证据</b></div><pre>SMB2 NEGOTIATE -&gt; Dialect 0x0210
+SESSION_SETUP(NTLM Type3 匿名) -&gt; STATUS_SUCCESS
+IPC$ TREE_CONNECT -&gt; STATUS_SUCCESS
+NetrShareEnum -&gt; 12 项
+  DATA  | 可写 | 财务共享
+  HR    | 可读 | 人事档案</pre><div class='kv'><b>匿名可枚举的共享</b></div><table><tr><th>#</th><th>共享名</th><th>类型</th><th>备注</th></tr><tr><td>1</td><td><code>DATA</code></td><td>disk</td><td>财务共享|可写</td></tr><tr><td>2</td><td><code>HR</code></td><td>disk</td><td>人事档案</td></tr></table><div class='kv'><b>复现</b></div><pre>smbclient -N -L //10.0.0.5
+python3 poc/smb_anon_shares_10_0_0_5.py</pre><div class="kv">PoC <code>poc/smb_anon_shares_10_0_0_5.py</code>（<code>python3 poc/smb_anon_shares_10_0_0_5.py</code>）</div><div class="kv">原始证据 <code>evidence/F-001-smb.txt</code></div><div class="kv">取得凭据：<code>smb 10.0.0.5:445 guest/TEST*******</code></div><div class="kv"><b>影响</b>：未授权者可枚举全部共享名，并直接读取 HR 共享内的人事档案。</div><div class="kv"><b>修复建议</b>：禁用匿名会话；关闭 SMB1；对共享启用最小权限 ACL。</div></div><h3><span class='badge high'>高危</span> 1 条</h3><div class="card"><h4>F-002 Redis 未授权访问<span class="tag">L2</span><span class="tag">confirmed</span></h4><div class="kv">目标 <b>10.0.0.9:6379</b></div><div class="kv">时间 2026-11-18T12:21:13+0800</div><div class='kv'><b>证据</b></div><pre>PING -&gt; +PONG
+INFO server -&gt; redis_version:6.2.6
+DBSIZE -&gt; 14823</pre><div class='kv'><b>复现</b></div><pre>redis-cli -h 10.0.0.9 PING</pre><div class="kv"><b>影响</b>：可读取/覆盖全部键值，并可写 crontab 或 SSH 公钥获取系统权限。</div><div class="kv"><b>修复建议</b>：绑定 127.0.0.1；设置 requirepass；禁止外网暴露 6379。</div></div><h3><span class='badge medium'>中危</span> 1 条</h3><div class="card"><h4>F-003 TLS 支持弱套件<span class="tag">L1</span><span class="tag">suspect</span></h4><div class="kv">目标 <b>10.0.0.12:443</b></div><div class="kv">时间 2026-11-18T12:21:13+0800</div><div class='kv'><b>证据</b></div><pre>(无)</pre><div class='kv'><b>复现</b></div><pre>(未提供)</pre><div class="kv"><b>影响</b>：中间人可降级协商到 3DES。</div><div class="kv"><b>修复建议</b>：禁用 3DES/RC4，启用 TLS1.2+。</div></div><h3><span class='badge low'>低危</span> 1 条</h3><div class="card"><h4>F-004 缺少安全响应头 &lt;script&gt; &amp; &quot;引号&quot;<span class="tag">L1</span><span class="tag">confirmed</span></h4><div class="kv">目标 <b>https://10.0.0.12/</b></div><div class="kv">时间 2026-11-18T12:21:13+0800</div><div class='kv'><b>证据</b></div><pre>GET / HTTP/1.1
+Host: 10.0.0.12
+&lt;无 Content-Security-Policy&gt;</pre><div class='kv'><b>复现</b></div><pre>curl -skI https://10.0.0.12/</pre><div class="kv"><b>影响</b>：XSS 与点击劫持的缓解措施缺失。</div><div class="kv"><b>修复建议</b>：下发 CSP / X-Frame-Options / X-Content-Type-Options。</div></div><h3><span class='badge info'>信息</span> 1 条</h3><div class="card"><h4>F-005 服务指纹识别<span class="tag">L1</span><span class="tag">confirmed</span></h4><div class="kv">目标 <b>10.0.0.20:22</b></div><div class="kv">时间 2026-11-18T12:21:13+0800</div><div class='kv'><b>证据</b></div><pre>SSH-2.0-OpenSSH_8.2p1 Ubuntu-4ubuntu0.5</pre><div class='kv'><b>复现</b></div><pre>nc -v 10.0.0.20 22</pre><div class="kv"><b>影响</b>：版本信息暴露，便于针对性选型。</div><div class="kv"><b>修复建议</b>：按需隐藏 banner。</div></div><h2>四、方法与边界</h2><div class='card'><ul><li>扫描方式：TCP connect 全端口探测（按强度档位取端口表），不做 SYN 半开。</li><li>服务判定：连接成功才算 open；指纹必须给出原始响应证据，识别不出记 unknown。</li><li>漏洞判定：走完协议拿到「只有漏洞成立才出现」的字节才计为确认。</li><li>口令策略：只做少量默认口令验证，<b>不做字典爆破</b>。</li><li>数据读取：数据库只取库表名与行数，不抽样明文；凭据在报告中一律打码。</li><li>L1 看得见 / L2 拿到真实数据或凭据 / L3 拿到内部权限。</li></ul></div><h2>五、与上一轮的差异</h2><div class='card'><div class='kv'>新增 <b>1</b> · 仍在 <b>1</b> · 已修复 <b>1</b></div><div class='kv'>🆕 F-001 SMB 匿名会话可枚举共享 @ 10.0.0.5:445</div><div class='kv'>✅ 已修复 F-000 旧版 Redis 未授权 @ 10.0.0.7:6379</div></div><footer>
+本报告由 Litmus 自动生成。判定纪律：只写已复现事实，推演内容标注【推演】；
+未测项在「覆盖情况」中单列原因。报告中凭据一律打码，完整值见 evidence/ 原始文件。
+</footer></div></body></html>

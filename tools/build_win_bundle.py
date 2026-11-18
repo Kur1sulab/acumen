@@ -62,13 +62,15 @@ if exist "engine\sweep.exe" set "VC_RECON_BIN=%CD%\engine\sweep.exe"
 echo.
 echo   空境 Kara  v{ver}
 echo   ---------------------------------------------
-echo   本地漏扫 · 自带引擎 · 只监听 127.0.0.1 · 不联网
+echo   本地漏扫 · 自带引擎 · 单一 CLI · 不联网
 echo.
-echo   启动后浏览器会自动打开，在「扫描」页填目标就能开扫。
-echo   关掉这个窗口即停止服务。换端口：kara.bat --port 7799
+echo   这是命令行界面：在下面这行后面直接接参数即可，例如
+echo     kara.bat scan -t https://example.com
+echo     kara.bat list --sev high
+echo   不带参数运行 = 打印状态。
 echo.
 
-"python\python.exe" -m vc.server --port 7788 --open %*
+"python\python.exe" -m vc.cli %*
 set "RC=%ERRORLEVEL%"
 
 if not "%RC%"=="0" goto :crashed
@@ -289,7 +291,7 @@ def assemble(python_zip: Path, build_dir: Path, engine_exe: Path) -> Path:
             return f"{BUNDLE}/{rel}"
 
         for must in ("kara.bat", "python/python.exe", "python/python312._pth",
-                     "python/_sqlite3.pyd", "vc/server.py", "vc/parsers_sweep.py",
+                     "python/_sqlite3.pyd", "vc/cli.py", "vc/parsers_sweep.py", "vc/paths.py",
                      "tests/smoke_bundle.py", "START-HERE.txt", "engine/sweep.exe"):
             if _p(must) not in got:
                 problems.append(f"缺 {must}")

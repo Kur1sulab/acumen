@@ -1,0 +1,49 @@
+id: phpinfo-exposure
+
+info:
+  name: PHP phpinfo() 页面暴露
+  author: litmus
+  severity: medium
+  description: |
+    站点根目录或常见路径下存在 phpinfo() 输出页，泄露绝对路径、环境变量、
+    扩展版本与服务器配置，可直接用于后续版本比对与路径穿越。
+  reference:
+    - https://www.php.net/manual/en/function.phpinfo.php
+  tags: exposure,php,config
+
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/phpinfo.php"
+      - "{{BaseURL}}/info.php"
+      - "{{BaseURL}}/test.php"
+      - "{{BaseURL}}/i.php"
+      - "{{BaseURL}}/p.php"
+
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "PHP Version"
+          - "phpinfo()"
+        condition: or
+
+      - type: word
+        part: body
+        words:
+          - "allow_url_include"
+          - "DOCUMENT_ROOT"
+        condition: or
+
+      - type: status
+        status:
+          - 200
+
+    extractors:
+      - type: regex
+        name: php_version
+        part: body
+        group: 1
+        regex:
+          - "PHP Version ([0-9.]+)"

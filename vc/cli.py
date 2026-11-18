@@ -1,73 +1,40 @@
-"""空境 · Kara —— 终端模式（无 Web、无浏览器、不占端口）。
+"""空境 Kara —— 单入口命令行（唯一界面）。
 
-Web 控制台能做的事这里都能做：扫 → 入账 → 看 → 复验 → 导出。
-区别只是不走 HTTP：全部在本进程里直连 Store / ScanManager / Verifier。
+三个动词，别的一律不进命令表：
 
-    python3 -m vc.cli scan -t 127.0.0.1:18080 --mode all
-    python3 -m vc.cli list --sev high
-    python3 -m vc.cli show 12
-    python3 -m vc.cli verify --all --sev high
-    python3 -m vc.cli export --format md -o report.md
-    python3 -m vc.cli engine
+    kara                              # 状态：引擎、库、存量
+    kara scan -t <目标> [-m 模式]      # 扫（-m strike 就是深度验证）
+    kara list [-i 序号] [--assets]    # 看（列表 / 详情 / 资产 / 导出）
+    kara verify [--ids …] [--deep]    # 复验（--deep 用验证内核真打）
 
-设计约束（跟 Web 版共用同一套逻辑，不复制粘贴）：
-  * 扫描走 scans.ScanManager（目标校验、引擎发现、进度解析、并发上限全在它手里）
-  * 入库走 store.Store + ingest.Ingestor（去重合并键一致）
-  * 复验走 verify.Verifier（同一模式同一入口重跑，连不上 ≠ 已消失）
+约束：
+  * 一条命令做一件事：没有子子命令、没有交互向导、没有配置文件。
+  * 扫描与复验共用 ScanManager / Verifier，写同一个库（默认 ~/.kara/vuln.db）。
+  * 引擎（Go 单文件）只负责跑，产物落收件箱，由 parsers_sweep 归一化入账。
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import socket
 import ssl
 import sys
 import time
 import unicodedata
+import urllib.parse
 from typing import Any, Dict, List, Optional
 
 from . import __version__
+from . import paths as kpaths
 from . import scans as sc
 from . import verify as vfy
 from .ingest import Ingestor
 from .store import Store
-from .server import DEFAULT_INBOXES, default_db_path
 
 TERMINAL_STATUS = ("ok", "partial", "failed", "stopped", "interrupted", "timeout")
-
-
-def probe_scheme(hostport: str) -> str:
-    """裸主机（可带端口）→ https / http。
-
-    引擎对 url 类目标默认补 https://，这在 http 站（本机靶场、内网业务系统）上会直接扫空：
-    连接失败 → 0 命中，看起来像「目标干净」。这里先握手一次再决定，省掉一次白跑。
-    """
-    head = hostport.split("/")[0]
-    host, _, port = head.rpartition(":")
-    if not host:                       # 没有端口
-        host, port = head, ""
-    host = host.strip("[]")
-    if not host:
-        return "https"
-
-    def _port(default: int) -> int:
-        return int(port) if port.isdigit() else default
-
-    try:
-        sock = socket.create_connection((host, _port(443)), timeout=3)
-        ctx = ssl._create_unverified_context()
-        ctx.wrap_socket(sock, server_hostname=host).close()
-        return "https"
-    except Exception:
-        pass
-    try:
-        socket.create_connection((host, _port(80)), timeout=3).close()
-        return "http"
-    except Exception:
-        return "https"
 SEV_COLOR = {"critical": "35", "high": "31", "medium": "33", "low": "36", "info": "90"}
+SEV_ORDER = ("critical", "high", "medium", "low", "info")
 
 
 # ---------------------------------------------------------------- 输出小工具
@@ -121,14 +88,45 @@ def _table(headers: List[str], rows: List[List[Any]], widths: List[int]) -> str:
     return "\n".join(lines)
 
 
+def probe_scheme(hostport: str) -> str:
+    """裸主机（可带端口）→ https / http。
+
+    引擎对 url 类目标默认补 https://，碰上 http 站会直接扫空：连接失败 → 0 命中，
+    看着像「目标干净」。这里先握手一次再决定，省掉一次白跑。
+    """
+    head = hostport.split("/")[0]
+    host, _, port = head.rpartition(":")
+    if not host:
+        host, port = head, ""
+    host = host.strip("[]")
+    if not host:
+        return "https"
+
+    def _port(default: int) -> int:
+        return int(port) if port.isdigit() else default
+
+    try:
+        sock = socket.create_connection((host, _port(443)), timeout=3)
+        ctx = ssl._create_unverified_context()
+        ctx.wrap_socket(sock, server_hostname=host).close()
+        return "https"
+    except Exception:
+        pass
+    try:
+        socket.create_connection((host, _port(80)), timeout=3).close()
+        return "http"
+    except Exception:
+        return "https"
+
+
 # ---------------------------------------------------------------- 装配
 
 class Ctx:
     def __init__(self, args: argparse.Namespace):
         self.args = args
-        self.db = os.path.abspath(os.path.expanduser(args.db or default_db_path()))
+        self.db = os.path.abspath(os.path.expanduser(args.db or kpaths.default_db_path()))
         self.inboxes = [os.path.abspath(os.path.expanduser(p))
-                        for p in (args.inbox or DEFAULT_INBOXES)]
+                        for p in (getattr(args, "inbox", None) or kpaths.DEFAULT_INBOXES)]
         for box in self.inboxes:
             try:
                 os.makedirs(box, exist_ok=True)
@@ -137,23 +135,22 @@ class Ctx:
         self.store = Store(self.db)
         self.ingestor = Ingestor(self.store, self.inboxes)
 
-    def manager(self) -> sc.ScanManager:
-        # ingest_cb=None：Web 版靠回调把产物推进库，终端版自己算准时机跑一次就够了。
-        # 两边都跑会让同一批产物入账两遍——第一遍新增、第二遍全算「合并」，统计会骗人。
+    def manager(self, mode_args: Optional[list] = None) -> sc.ScanManager:
+        # ingest_cb=None：入账由本进程在确定时机跑一次，避免同一批产物入两遍
         return sc.ScanManager(
             db_path=self.db,
             inbox_root=self.inboxes[0],
-            engine=self.args.engine,
+            engine=getattr(self.args, "engine", ""),
             timeout=getattr(self.args, "timeout", 900),
             max_parallel=getattr(self.args, "parallel", 2),
+            mode_args=mode_args,
             ingest_cb=None,
         )
 
 
-# ---------------------------------------------------------------- scan
+# ---------------------------------------------------------------- 任务轮询
 
 def _print_job_status(runs: List[Dict[str, Any]], elapsed: float, job_status: str) -> None:
-    """一行实时状态（只在 TTY 里刷，重定向到文件时不铺垃圾）。"""
     if not _tty():
         return
     parts = []
@@ -165,41 +162,7 @@ def _print_job_status(runs: List[Dict[str, Any]], elapsed: float, job_status: st
     sys.stdout.flush()
 
 
-def cmd_scan(ctx: Ctx, args: argparse.Namespace) -> int:
-    mgr = ctx.manager()
-    if not mgr.engine:
-        print(_c(sc.ENGINE_HINT, "31"), file=sys.stderr)
-        return 2
-    mode = args.mode
-    raw = list(args.targets)
-    if sc.MODES[mode]["kind"] == "url" and args.scheme != "raw":
-        fixed = []
-        for t in raw:
-            if "://" in t:
-                fixed.append(t)
-                continue
-            picked = args.scheme if args.scheme in ("http", "https") else probe_scheme(t)
-            fixed.append(f"{picked}://{t}")
-            print(f"  {_c('[scheme]', '36')} {t} → {picked}://{t}")
-        raw = fixed
-    try:
-        targets = sc.normalize_targets(mode, raw)
-    except sc.ScanError as exc:
-        print(_c(f"[!] {exc}", "31"), file=sys.stderr)
-        return 2
-
-    before = ctx.store.conn.execute("SELECT COALESCE(MAX(id),0) c FROM findings").fetchone()["c"]
-
-    print(f"{_c('空境 · Kara', '1')} v{__version__}　终端模式")
-    print(f"  引擎　{_c(mgr.engine, '36')}")
-    print(f"  模式　{sc.MODES[mode]['label']}（{sc.MODES[mode]['hint']}）")
-    print(f"  目标　{', '.join(targets)}")
-    print(f"  库　　{ctx.db}")
-    print(f"  产物　{ctx.inboxes[0]}")
-    print()
-
-    res = mgr.start(mode, targets, parallel=args.parallel, timeout=args.timeout)
-    job_id = res["job_id"]
+def _run_job_loop(mgr, job_id: int) -> str:
     t0 = time.time()
     cursor = 0
     status = "queued"
@@ -208,7 +171,7 @@ def cmd_scan(ctx: Ctx, args: argparse.Namespace) -> int:
             j = mgr.job(job_id, log_from=cursor)
             if not j:
                 print(_c("[!] 任务查不到，可能被清库了", "31"), file=sys.stderr)
-                return 2
+                return "failed"
             log = j.get("log") or {}
             for line in log.get("lines") or []:
                 if _tty():
@@ -230,62 +193,131 @@ def cmd_scan(ctx: Ctx, args: argparse.Namespace) -> int:
                 status = j["status"]
                 break
             time.sleep(0.3)
-
     if _tty():
         sys.stdout.write("\r\033[K")
-    elapsed = time.time() - t0
     print()
-    print(f"{_c('[kara]', '36')} 任务 #{job_id} {status} · 用时 {_hms(elapsed)}")
+    print(f"{_c('[kara]', '36')} 任务 #{job_id} {status} · 用时 {_hms(time.time() - t0)}")
+    return status
 
-    # 引擎产物 → 库（job 线程末尾也会触发一次，这里显式跑一遍拿确定的统计）
+
+def _ingest(ctx: Ctx) -> Dict[str, Any]:
     stats = ctx.ingestor.scan() or {}
     print(f"{_c('[kara]', '36')} 入账：新解析 {stats.get('parsed', 0)} 个产物 · "
           f"漏洞 +{stats.get('findings_added', 0)} · 合并 {stats.get('findings_merged', 0)} · "
           f"资产 +{stats.get('assets', 0)} · 解析失败 {stats.get('errors', 0)}")
+    return stats
 
+
+def _mode_args(args: argparse.Namespace) -> List[str]:
+    """验证内核的透传参数（其它模式用不到）。"""
+    out: List[str] = []
+    if getattr(args, "ports", ""):
+        out += ["--ports", args.ports]
+    if getattr(args, "intensity", ""):
+        out += ["--intensity", args.intensity]
+    if getattr(args, "allow_public", False):
+        out += ["--allow-public"]
+    return out
+
+
+def _level_of(row: Dict[str, Any]) -> str:
+    """从证据串里摘出验证内核给的级别标记，如 [L2/confirmed]。"""
+    ev = row.get("evidence") or ""
+    if "[" in ev and "]" in ev:
+        seg = ev[ev.rfind("[") + 1:ev.rfind("]")]
+        if "/" in seg or seg.startswith("L"):
+            return seg
+    return "-"
+
+
+def _show_new(ctx: Ctx, before: int) -> int:
     rows = [dict(r) for r in ctx.store.conn.execute(
-        "SELECT id,sev,title,asset,endpoint,count FROM findings WHERE id > ? "
+        "SELECT id,sev,title,asset,endpoint,count,evidence FROM findings WHERE id > ? "
         "ORDER BY sev_rank DESC, id", (before,)).fetchall()]
     if not rows:
         print(f"{_c('[kara]', '36')} 本轮没有新增命中（老命中被重复报到的会并进原条目）")
         return 0
     print()
-    print(_table(["ID", "严重度", "标题", "资产", "端点", "次数"],
-                 [[r["id"], _sev(r["sev"]), _cut(r["title"], 40), _cut(r["asset"], 28),
-                   _cut(r["endpoint"] or "-", 34), r["count"]] for r in rows],
-                 [5, 8, 40, 28, 34, 4]))
+    print(_table(["ID", "严重度", "标题", "资产", "级别", "次数"],
+                 [[r["id"], _sev(r["sev"]), _cut(r["title"], 40), _cut(r["asset"], 26),
+                   _cut(_level_of(r), 12), r["count"]] for r in rows],
+                 [5, 8, 40, 26, 12, 4]))
+    print(f"\n看详情：{_c('kara list -i ' + str(rows[0]['id']), '36')}　"
+          f"复验：{_c('kara verify --ids ' + ','.join(str(r['id']) for r in rows[:8]), '36')}")
+    return 0
+
+
+# ---------------------------------------------------------------- 状态（裸命令）
+
+def cmd_status(ctx: Ctx, args: argparse.Namespace) -> int:
+    mgr = ctx.manager()
+    meta = mgr.meta().get("engine") or {}
+    s = ctx.store.summary()
+    print(f"{_c('空境 · Kara', '1')} v{__version__}　本地漏扫（单一 CLI）")
+    print(f"  引擎　{meta.get('path') or '(未找到)'}"
+          + (f"　{meta.get('version') or ''}" if meta.get("ok") else ""))
+    if not meta.get("ok"):
+        print(_c("  " + (meta.get("hint") or sc.ENGINE_HINT).replace("\n", "\n  "), "33"))
+    print(f"  库　　{ctx.db}")
+    sev = s["severity"]
+    print(f"  存量　漏洞 {s['findings']} 条 / 命中 {s['hits']} 次　资产 {s['assets']}　文件 {s['files']}")
+    print("  分级　" + "　".join(f"{k} {sev.get(k, 0)}" for k in SEV_ORDER))
+    if s.get("last_scan"):
+        print(f"  最近　{s['last_scan']}")
     print()
-    first_id = rows[0]["id"]
-    verify_ids = ",".join(str(r["id"]) for r in rows[:8])
-    print(f"常用：{_c('python3 -m vc.cli show ' + str(first_id), '36')}　看详情与复现命令　"
-          f"{_c('python3 -m vc.cli verify --ids ' + verify_ids, '36')}　复验")
+    print("  kara scan -t <目标> [-m 模式]　扫（-m strike = 深度验证，会真发请求）")
+    print("  kara list [-i 序号] [--assets]　看（--csv/--md 导出）")
+    print("  kara verify [--ids …] [--deep]　复验")
     return 0
 
 
-# ---------------------------------------------------------------- list / show
+# ---------------------------------------------------------------- scan
 
-def cmd_list(ctx: Ctx, args: argparse.Namespace) -> int:
-    data = ctx.store.findings(sev=args.sev, status=args.status, q=args.q, limit=args.limit)
-    rows = data["rows"]
-    if not rows:
-        print("库里没有符合条件的条目。先 'scan' 或 'ingest'。")
-        return 0
-    print(_table(["ID", "严重度", "标题", "资产", "端点", "次数", "状态", "复验"],
-                 [[r["id"], _sev(r["sev"]), _cut(r["title"], 38), _cut(r["asset"], 26),
-                   _cut(r["endpoint"] or "-", 30), r["count"], _cut(r["status"], 8),
-                   _cut(r.get("verify") or "-", 8)] for r in rows],
-                 [5, 8, 38, 26, 30, 4, 8, 8]))
-    print(f"\n共 {data['total']} 条（显示 {len(rows)}）")
+def cmd_scan(ctx: Ctx, args: argparse.Namespace) -> int:
+    mode = args.mode
+    mgr = ctx.manager(mode_args=_mode_args(args) if mode == "strike" else None)
+    if not mgr.engine:
+        print(_c(sc.ENGINE_HINT, "31"), file=sys.stderr)
+        return 2
+
+    raw = list(args.targets)
+    if sc.MODES[mode]["kind"] == "url" and args.scheme != "raw":
+        fixed = []
+        for t in raw:
+            if "://" in t:
+                fixed.append(t)
+                continue
+            picked = args.scheme if args.scheme in ("http", "https") else probe_scheme(t)
+            fixed.append(f"{picked}://{t}")
+            print(f"  {_c('[scheme]', '36')} {t} → {picked}://{t}")
+        raw = fixed
+    try:
+        targets = sc.normalize_targets(mode, raw)
+    except sc.ScanError as exc:
+        print(_c(f"[!] {exc}", "31"), file=sys.stderr)
+        return 2
+
+    before = ctx.store.conn.execute("SELECT COALESCE(MAX(id),0) c FROM findings").fetchone()["c"]
+    print(f"{_c('空境 · Kara', '1')} v{__version__}　{sc.MODES[mode]['label']}")
+    print(f"  模式　{sc.MODES[mode]['hint']}")
+    print(f"  目标　{', '.join(targets)}")
+    print(f"  引擎　{mgr.engine}")
+    print()
+
+    res = mgr.start(mode, targets, parallel=args.parallel, timeout=args.timeout)
+    _run_job_loop(mgr, res["job_id"])
+    _ingest(ctx)
+    _show_new(ctx, before)
     return 0
 
+
+# ---------------------------------------------------------------- list
 
 def _ports_text(ports: Any, cap: int = 8) -> str:
-    """store 里的 ports 是 [{"port":80,"service":"http"}, …]，这里摊成一行。"""
     items = []
     for p in ports or []:
         if isinstance(p, dict):
-            num = p.get("port")
-            svc = p.get("service") or ""
+            num, svc = p.get("port"), p.get("service") or ""
             items.append(f"{num}" + (f"({svc})" if svc else ""))
         else:
             items.append(str(p))
@@ -295,37 +327,66 @@ def _ports_text(ports: Any, cap: int = 8) -> str:
     return head + (f" …+{len(items) - cap}" if len(items) > cap else "")
 
 
-def cmd_assets(ctx: Ctx, args: argparse.Namespace) -> int:
-    data = ctx.store.assets(q=args.q, limit=args.limit)
+def cmd_list(ctx: Ctx, args: argparse.Namespace) -> int:
+    if args.csv or args.md:
+        out = os.path.abspath(os.path.expanduser(args.csv or args.md))
+        if args.csv:
+            # 带 BOM：Windows Excel 双击不乱码
+            data = ctx.store.export_csv(sev=args.sev, status=args.status, q=args.q).encode("utf-8-sig")
+        else:
+            data = ctx.store.export_md(sev=args.sev, status=args.status, q=args.q).encode("utf-8")
+        with open(out, "wb") as fh:
+            fh.write(data)
+        print(f"已写 {out}（{len(data)} 字节）")
+        return 0
+
+    if args.id is not None:
+        return _show_one(ctx, args.id)
+
+    if args.assets:
+        data = ctx.store.assets(q=args.q, limit=args.limit)
+        rows = data["rows"]
+        if not rows:
+            print("库里还没有资产。先 kara scan。")
+            return 0
+        print(_table(["资产", "IP", "端口", "标题 / 最高命中", "指纹", "漏洞"],
+                     [[_cut(r.get("host") or "-", 30), _cut(r.get("ip") or "-", 16),
+                       _cut(_ports_text(r.get("ports")), 30),
+                       _cut(r.get("title") or r.get("hint") or "-", 30),
+                       _cut(r.get("fingerprint") or r.get("services") or "-", 22),
+                       f"{r.get('n_find') or 0}" + (f" ({r['top_sev']})" if r.get("top_sev") else "")]
+                      for r in rows],
+                     [30, 16, 30, 30, 22, 12]))
+        print(f"\n共 {data['total']} 个资产（显示 {len(rows)}）")
+        return 0
+
+    data = ctx.store.findings(sev=args.sev, status=args.status, q=args.q, limit=args.limit)
     rows = data["rows"]
     if not rows:
-        print("库里还没有资产。先 'scan' 或 'ingest'。")
+        print("库里没有符合条件的条目。先 kara scan。")
         return 0
-    print(_table(["资产", "IP", "端口", "标题 / 最高命中", "指纹", "漏洞"],
-                 [[_cut(r.get("host") or "-", 30),
-                   _cut(r.get("ip") or "-", 16),
-                   _cut(_ports_text(r.get("ports")), 30),
-                   _cut(r.get("title") or r.get("hint") or "-", 30),
-                   _cut(r.get("fingerprint") or r.get("services") or "-", 22),
-                   f"{r.get('n_find') or 0}" + (f" ({r['top_sev']})" if r.get("top_sev") else "")] for r in rows],
-                 [30, 16, 30, 30, 22, 12]))
-    print(f"\n共 {data['total']} 个资产（显示 {len(rows)}）")
+    print(_table(["ID", "严重度", "标题", "资产", "端点", "级别", "次数", "状态"],
+                 [[r["id"], _sev(r["sev"]), _cut(r["title"], 36), _cut(r["asset"], 24),
+                   _cut(r["endpoint"] or "-", 28), _cut(_level_of(dict(r)), 12), r["count"],
+                   _cut(r["status"], 8)] for r in rows],
+                 [5, 8, 36, 24, 28, 12, 4, 8]))
+    print(f"\n共 {data['total']} 条（显示 {len(rows)}）　详情 {_c('kara list -i <ID>', '36')}"
+          f"　导出 {_c('kara list --csv out.csv', '36')}")
     return 0
 
 
-def cmd_show(ctx: Ctx, args: argparse.Namespace) -> int:
-    rows = ctx.store.findings_by_ids([args.id])
+def _show_one(ctx: Ctx, row_id: int) -> int:
+    rows = ctx.store.findings_by_ids([row_id])
     if not rows:
-        print(f"[!] id={args.id} 不存在", file=sys.stderr)
+        print(f"[!] 序号 {row_id} 不存在", file=sys.stderr)
         return 2
-    r = rows[0]
+    r = dict(rows[0])
     print(f"{_c(str(r.get('title') or ''), '1')}")
-    print(f"  严重度　{_sev(r.get('sev') or 'info')}  {r.get('cve') or ''}")
+    print(f"  严重度　{_sev(r.get('sev') or 'info')}　级别 {_level_of(r)}")
     print(f"  资产　　{r.get('asset') or '-'}　端口 {r.get('port') or '-'}　IP {r.get('ip') or '-'}")
     print(f"  端点　　{r.get('endpoint') or '-'}")
-    print(f"  参数　　{r.get('param') or '-'}")
-    print(f"  来源　　{r.get('sources') or '-'}")
-    print(f"  次数　　{r.get('count')}　状态 {r.get('status')}　复验 {r.get('verify') or '-'} {r.get('verify_note') or ''}")
+    print(f"  来源　　{r.get('sources') or '-'}　次数 {r.get('count')}　状态 {r.get('status')}")
+    print(f"  复验　　{r.get('verify_state') or '未复验'} {r.get('verify_note') or ''}")
     print(f"  时间　　{r.get('first_seen')} → {r.get('last_seen')}")
     if r.get("evidence"):
         print(f"  判据　　{_cut(r['evidence'], 400)}")
@@ -335,56 +396,42 @@ def cmd_show(ctx: Ctx, args: argparse.Namespace) -> int:
     return 0
 
 
-# ---------------------------------------------------------------- ingest / export
-
-def cmd_ingest(ctx: Ctx, args: argparse.Namespace) -> int:
-    stats = ctx.ingestor.scan(force=args.force) or {}
-    print(f"收件箱：{', '.join(ctx.inboxes)}")
-    print(f"扫描 {stats.get('seen', 0)} 个文件 · 新解析 {stats.get('parsed', 0)} · "
-          f"漏洞 +{stats.get('findings_added', 0)} · 合并 {stats.get('findings_merged', 0)} · "
-          f"资产 +{stats.get('assets', 0)} · 跳过 {stats.get('skipped', 0)} · "
-          f"失败 {stats.get('errors', 0)}　用时 {stats.get('elapsed', 0)}s")
-    if stats.get("truncated"):
-        print("  [!] 达到单次扫描文件上限，剩下的留到下次")
-    return 0
-
-
-def cmd_export(ctx: Ctx, args: argparse.Namespace) -> int:
-    if args.format == "csv":
-        # 跟网页导出一致：utf-8-sig（带 BOM），否则 Windows Excel 双击就是乱码
-        text = ctx.store.export_csv(sev=args.sev, status=args.status, q=args.q)
-        data = text.encode("utf-8-sig")
-    else:
-        text = ctx.store.export_md(sev=args.sev, status=args.status, q=args.q)
-        data = text.encode("utf-8")
-    if args.out:
-        path = os.path.abspath(os.path.expanduser(args.out))
-        with open(path, "wb") as fh:
-            fh.write(data)
-        print(f"已写 {path}（{len(data)} 字节）")
-    else:
-        sys.stdout.write(text)
-    return 0
-
-
 # ---------------------------------------------------------------- verify
 
+def _target_of(row: Dict[str, Any]) -> str:
+    """一条命中 → 可回访的目标（端点裁到 scheme://host:port，退回「资产:端口」）。"""
+    ep = (row.get("endpoint") or "").strip()
+    if ep.startswith(("http://", "https://")):
+        u = urllib.parse.urlsplit(ep)
+        if u.hostname:
+            return f"{u.scheme}://{u.hostname}" + (f":{u.port}" if u.port else "")
+    asset = str(row.get("asset") or "").strip()
+    if asset and asset not in ("-", "unknown"):
+        port = row.get("port")
+        return f"{asset}:{port}" if port and ":" not in asset else asset
+    return ""
+
+
 def cmd_verify(ctx: Ctx, args: argparse.Namespace) -> int:
+    if args.ids:
+        ids = [int(x) for x in args.ids.replace(",", " ").split() if x.strip().isdigit()]
+        rows = [dict(r) for r in ctx.store.findings_by_ids(ids)]
+    else:
+        rows = [dict(r) for r in ctx.store.findings(sev=args.sev, status=args.status,
+                                                   limit=args.limit)["rows"]]
+    if not rows:
+        print("没有要复验的条目。")
+        return 0
+    if args.deep:
+        return _verify_deep(ctx, rows, args)
+
     mgr = ctx.manager()
     if not mgr.engine:
         print(_c(sc.ENGINE_HINT, "31"), file=sys.stderr)
         return 2
-    if args.ids:
-        ids = [int(x) for x in args.ids.replace(",", " ").split() if x.strip().isdigit()]
-    else:
-        ids = [r["id"] for r in ctx.store.findings(sev=args.sev, status=args.status,
-                                                   limit=args.limit)["rows"]]
-    if not ids:
-        print("没有要复验的条目。")
-        return 0
-
     v = vfy.Verifier(ctx.store, engine=mgr.engine, timeout=args.timeout,
                      log=lambda lvl, msg: print(f"  [{lvl}] {msg}"))
+    ids = [r["id"] for r in rows]
     print(f"复验 {len(ids)} 条：按当初发现它的同一个模式、同一个入口重跑…")
     v.start(ids)
     try:
@@ -399,7 +446,7 @@ def cmd_verify(ctx: Ctx, args: argparse.Namespace) -> int:
                 sys.stdout.flush()
             time.sleep(0.4)
     except KeyboardInterrupt:
-        print("\n[kara] 中断（当前批次跑完的那部分已写回库）")
+        print("\n[kara] 中断（跑完的那部分已写回库）")
         return 130
     if _tty():
         sys.stdout.write("\r\033[K")
@@ -407,133 +454,52 @@ def cmd_verify(ctx: Ctx, args: argparse.Namespace) -> int:
     summary = st.get("summary") or {}
     print(f"{_c('[kara]', '36')} 复验完成　" + "　".join(f"{k} {n}" for k, n in summary.items() if n))
     for item in (st.get("last") or [])[:20]:
-        print(f"  #{item.get('id')} {item.get('state')} {_cut(item.get('title') or '', 40)} {_cut(item.get('note') or '', 40)}")
+        print(f"  #{item.get('id')} {item.get('state')} {_cut(item.get('title') or '', 40)} "
+              f"{_cut(item.get('note') or '', 40)}")
     return 0
 
 
-# ---------------------------------------------------------------- strike（移交给 litmus2）
-
-def cmd_strike(ctx: Ctx, args: argparse.Namespace) -> int:
-    """挑命中 → 生成目标清单 → 交 litmus2 真打一轮 → 结论回写本库。
-
-    边界：Kara 的引擎只读，只给「可疑面」；是不是真漏洞、能不能打进去由执行层判定。
-    这里不复制执行层的检查逻辑，只做移交与结果归一化。
-    """
-    from . import strike as st
-
-    if args.ids:
-        ids = [int(x) for x in args.ids.replace(",", " ").split() if x.strip().isdigit()]
-        rows = [dict(r) for r in ctx.store.findings_by_ids(ids)]
-    else:
-        rows = ctx.store.findings(sev=args.sev, status=args.status, q=args.q, limit=args.limit)["rows"]
-        rows = [dict(r) for r in rows]
-    rows = [r for r in rows if st.target_of(r)]
-    direct = [t.strip() for t in (args.target or []) if t.strip()]
-    if not rows and not direct:
-        print("没有可移交的命中：库里这些条目没有可回访的目标（白盒报告、离线产物都算）。")
-        print("  两条出路：① 挑有 endpoint/asset 的条目（kara list --sev high）"
-              "　② 直接给目标：kara strike --target https://example.com")
-        return 0
-
-    targets = st.collect(rows)
-    for t in direct:
-        if t.lower() not in {x.lower() for x in targets}:
+def _verify_deep(ctx: Ctx, rows: List[Dict[str, Any]], args: argparse.Namespace) -> int:
+    """--deep：用验证内核真打一遍（L1 → L2 的那一步），而不是重放只读探测。"""
+    targets: List[str] = []
+    for t in getattr(args, "target", None) or []:
+        t = t.strip()
+        if t and t.lower() not in {x.lower() for x in targets}:
             targets.append(t)
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    work = os.path.abspath(os.path.expanduser(os.path.join("~/.kara/strike", stamp)))
-    os.makedirs(work, exist_ok=True)
-    seed_path = os.path.join(work, "seed-findings.json")
-    tgt_path = os.path.join(work, "targets.txt")
-    seeds = st.build_seed(rows)
-    with open(seed_path, "w", encoding="utf-8") as fh:
-        json.dump({"findings": seeds}, fh, ensure_ascii=False, indent=2)
-    with open(tgt_path, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(targets) + "\n")
+    for r in rows:
+        t = _target_of(r)
+        if t and t.lower() not in {x.lower() for x in targets}:
+            targets.append(t)
+    if not targets:
+        print("这些条目没有可回访的目标（白盒报告、离线产物都这样），深度验证需要端点或资产。")
+        return 0
+    try:
+        targets = sc.normalize_targets("strike", targets)
+    except sc.ScanError as exc:
+        print(_c(f"[!] {exc}", "31"), file=sys.stderr)
+        return 2
 
-    print(f"{_c('空境 · Kara', '1')} v{__version__}　移交给执行层")
-    print(f"  命中　{len(rows)} 条 → 目标 {len(targets)} 个")
-    print(f"  工作目录 {work}")
-    print(f"  目标清单 {tgt_path}")
-    print(f"  线索雏形 {seed_path}")
-    print()
-    print(_table(["#", "目标", "来自命中"],
-                 [[i + 1, _cut(t, 60), sum(1 for r in rows if st.target_of(r) == t)] for i, t in enumerate(targets)],
-                 [3, 60, 9]))
-
+    mgr = ctx.manager(mode_args=_mode_args(args))
+    if not mgr.engine:
+        print(_c(sc.ENGINE_HINT, "31"), file=sys.stderr)
+        return 2
     if args.dry_run:
-        print("\n--dry-run：清单已生成，没有发起任何请求。要去打就跑同一条命令去掉 --dry-run。")
+        print(f"{_c('空境 · Kara', '1')} v{__version__}　深度验证（dry-run）")
+        print(f"  目标 {len(targets)} 个")
+        for i, t in enumerate(targets, 1):
+            print(f"  {i:>2}. {t}")
+        print("\n--dry-run：没有发起任何请求。去掉它就跑。")
         return 0
 
-    lit = st.find_litmus(args.litmus_bin)
-    if not lit:
-        print()
-        print(_c(st.HINT, "33"), file=sys.stderr)
-        return 2
-
+    before = ctx.store.conn.execute("SELECT COALESCE(MAX(id),0) c FROM findings").fetchone()["c"]
+    print(f"{_c('空境 · Kara', '1')} v{__version__}　深度验证")
+    print(f"  来源　{len(rows)} 条命中 → 目标 {len(targets)} 个：{', '.join(targets)}")
+    print(_c("  这一档会真的发请求（真登/未授权/注入探测），确认目标在授权范围内。", "33"))
     print()
-    print(f"{_c('[strike]', '36')} 执行层 {lit}")
-    print(f"{_c('[strike]', '36')} 这是真的发请求做验证（不再是只读观测），目标必须在你授权范围内")
-    rc, out_dir = st.run_litmus(lit, targets, os.path.join(work, "litmus"),
-                                timeout=args.timeout, ports=args.ports,
-                                extra=args.litmus_arg, log=print)
-    print(f"{_c('[strike]', '36')} litmus 退出码 {rc}　产物 {out_dir}")
-
-    items = st.read_litmus_findings(out_dir)
-    if not items:
-        print(f"{_c('[strike]', '36')} 执行层没有产出 findings.json（本轮可能全 skip/na，看上面的日志）")
-        return 0 if rc == 0 else 1
-
-    mix = st.summarize(items)
-    kara_rows = st.to_kara(items, os.path.join(out_dir, "findings.json"))
-    added, merged = ctx.store.add_findings(kara_rows, os.path.join(out_dir, "findings.json"))
-    print(f"{_c('[strike]', '36')} 执行层结论 {len(items)} 条　"
-          + "　".join(f"{k} {mix[k]}" for k in ("critical", "high", "medium", "low", "info") if mix.get(k)))
-    print(f"{_c('[strike]', '36')} 回写本库：新增 {added} · 合并进既有条目 {merged}")
-
-    new_rows = [r for r in ctx.store.findings(limit=200)["rows"] if (r.get("sources") or "").find("litmus2") >= 0]
-    if new_rows:
-        print()
-        print(_table(["ID", "严重度", "标题", "资产", "级别/置信"],
-                     [[r["id"], _sev(r["sev"]), _cut(r["title"], 38), _cut(r["asset"], 24),
-                       _cut((r.get("evidence") or "").split("·")[-1].strip(), 14)] for r in new_rows[:15]],
-                     [5, 8, 38, 24, 14]))
-    return 0
-
-
-# ---------------------------------------------------------------- summary / engine
-
-def cmd_summary(ctx: Ctx, args: argparse.Namespace) -> int:
-    s = ctx.store.summary()
-    sev = s["severity"]
-    print(f"{_c('空境 · Kara', '1')} v{__version__}　库 {ctx.db}")
-    print(f"  漏洞 {s['findings']} 条 / 命中 {s['hits']} 次　资产 {s['assets']}　已摄入文件 {s['files']}")
-    print("  严重度　" + "　".join(f"{k} {sev.get(k, 0)}" for k in ("critical", "high", "medium", "low", "info")))
-    if s.get("by_verify"):
-        print("  复验　　" + "　".join(f"{r.get('verify')} {r.get('n')}" for r in s["by_verify"]))
-    if s.get("by_status"):
-        print("  状态　　" + "　".join(f"{r.get('status')} {r.get('n')}" for r in s["by_status"]))
-    if s.get("top_assets"):
-        print("  头号资产")
-        for a in s["top_assets"][:6]:
-            print(f"    {_cut(a.get('asset') or '-', 40):<42}{a.get('n')} 条")
-    if s.get("last_scan"):
-        print(f"  最近扫描 {s['last_scan']}")
-    return 0
-
-
-def cmd_engine(ctx: Ctx, args: argparse.Namespace) -> int:
-    mgr = ctx.manager()
-    meta = mgr.meta()
-    eng = meta.get("engine") or {}
-    print(f"引擎　{eng.get('path') or '(未找到)'}")
-    print(f"  可用　{'是' if eng.get('ok') else '否'}　版本 {eng.get('version') or '-'}")
-    if not eng.get("ok"):
-        print(_c(eng.get("hint") or sc.ENGINE_HINT, "33"))
-        return 2
-    print(f"  库　　{ctx.db}")
-    print(f"  收件箱 {', '.join(ctx.inboxes)}")
-    for m, spec in sc.MODES.items():
-        print(f"  · {m:<12}{spec['label']}  ({spec['flag']} <{spec['kind']}>)")
+    res = mgr.start("strike", targets, parallel=args.parallel, timeout=args.timeout)
+    _run_job_loop(mgr, res["job_id"])
+    _ingest(ctx)
+    _show_new(ctx, before)
     return 0
 
 
@@ -541,77 +507,53 @@ def cmd_engine(ctx: Ctx, args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
-        prog="python3 -m vc.cli",
-        description="空境 · Kara —— 终端模式（扫 / 入账 / 复验 / 导出，无 Web 界面）")
-    ap.add_argument("--db", default="", help=f"SQLite 库路径（默认 {default_db_path()}）")
+        prog="kara",
+        description="空境 Kara —— 本地漏扫（单一 CLI：scan / list / verify）",
+        epilog="不给子命令就打印状态。")
+    ap.add_argument("--db", default="", help=f"库路径（默认 {kpaths.default_db_path()}）")
     ap.add_argument("--inbox", action="append", default=None, help="收件箱目录，可重复")
-    ap.add_argument("--engine", default="", help="sweep 可执行文件路径（默认自动查找）")
+    ap.add_argument("--engine", default="", help="引擎路径（默认自动查找）")
     ap.add_argument("--timeout", type=int, default=900, help="单目标超时秒数（默认 900）")
-    ap.add_argument("--parallel", type=int, default=2, help="并发目标数（上限 4，默认 2）")
+    ap.add_argument("--parallel", type=int, default=2, help="并发目标数（上限 4）")
     ap.add_argument("-v", "--version", action="version", version=f"kara {__version__}")
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub = ap.add_subparsers(dest="cmd")
 
-    p = sub.add_parser("scan", help="起一次扫描并在终端看进度")
+    p = sub.add_parser("scan", help="扫描（-m strike 为深度验证）")
     p.add_argument("-t", "--targets", nargs="+", required=True, help="目标（域名 / IP / URL）")
     p.add_argument("-m", "--mode", default="all", choices=list(sc.MODES), help="扫描模式")
     p.add_argument("--scheme", default="auto", choices=["auto", "http", "https", "raw"],
-                   help="url 类模式的目标协议：auto=先握手判定（默认）/ raw=原样交给引擎（默认补 https）")
+                   help="url 类模式的协议：auto 先握手判定（默认）")
+    p.add_argument("--ports", default="", help="仅 strike：top100 / top1000 / full / 80,443")
+    p.add_argument("--intensity", default="", choices=["", "low", "normal", "high"],
+                   help="仅 strike：强度档位")
+    p.add_argument("--allow-public", action="store_true", help="仅 strike：允许公网目标")
     p.set_defaults(func=cmd_scan)
 
-    p = sub.add_parser("ingest", help="把收件箱里的产物解析入库（增量；--force 全量重解析）")
-    p.add_argument("--force", action="store_true", help="忽略内容指纹，已摄入的文件也重新解析")
-    p.set_defaults(func=cmd_ingest)
-
-    p = sub.add_parser("list", help="列命中")
+    p = sub.add_parser("list", help="看：列表 / 详情 / 资产 / 导出")
+    p.add_argument("-i", "--id", type=int, default=None, help="看某一条的详情")
+    p.add_argument("--assets", action="store_true", help="看资产（主机/端口/指纹）")
     p.add_argument("--sev", default="", choices=["", "critical", "high", "medium", "low", "info"])
     p.add_argument("--status", default="", help="待验证 / 已确认 / 误报 / 已修复 / 已忽略")
     p.add_argument("--q", default="", help="关键词")
     p.add_argument("--limit", type=int, default=50)
+    p.add_argument("--csv", default="", help="导出 CSV 到该文件")
+    p.add_argument("--md", default="", help="导出 Markdown 到该文件")
     p.set_defaults(func=cmd_list)
 
-    p = sub.add_parser("assets", help="列资产（主机/端口/指纹）")
-    p.add_argument("--q", default="", help="关键词")
-    p.add_argument("--limit", type=int, default=60)
-    p.set_defaults(func=cmd_assets)
-
-    p = sub.add_parser("show", help="看单条详情（含判据与复现命令）")
-    p.add_argument("id", type=int)
-    p.set_defaults(func=cmd_show)
-
-    p = sub.add_parser("export", help="导出 CSV / MD")
-    p.add_argument("--format", dest="format", default="md", choices=["csv", "md"])
-    p.add_argument("-o", "--out", default="", help="输出文件；不给就打到 stdout")
-    p.add_argument("--sev", default="", choices=["", "critical", "high", "medium", "low", "info"])
-    p.add_argument("--status", default="")
-    p.add_argument("--q", default="")
-    p.set_defaults(func=cmd_export)
-
-    p = sub.add_parser("verify", help="复验（同一模式同一入口重跑）")
+    p = sub.add_parser("verify", help="复验（--deep 用验证内核真打）")
     p.add_argument("--ids", default="", help="如 12,15,19；不给就按筛选批量")
+    p.add_argument("--target", action="append", default=[], help="仅 --deep：直接指定目标")
     p.add_argument("--sev", default="", choices=["", "critical", "high", "medium", "low", "info"])
     p.add_argument("--status", default="")
     p.add_argument("--limit", type=int, default=50)
+    p.add_argument("--deep", action="store_true", help="深度验证（会真发请求）")
+    p.add_argument("--dry-run", action="store_true", help="仅 --deep：只列目标，不发请求")
+    p.add_argument("--ports", default="", help="仅 --deep：top100 / full / 80,443")
+    p.add_argument("--intensity", default="", choices=["", "low", "normal", "high"])
+    p.add_argument("--allow-public", action="store_true")
     p.set_defaults(func=cmd_verify)
 
-    p = sub.add_parser("strike", help="把命中移交 litmus2 真打一轮，结论回写本库")
-    p.add_argument("--ids", default="", help="如 5,9,10；不给就按 --sev/--status 挑")
-    p.add_argument("--sev", default="", choices=["", "critical", "high", "medium", "low", "info"])
-    p.add_argument("--status", default="", help="待验证 / 已确认 / 误报 …")
-    p.add_argument("--q", default="", help="关键词")
-    p.add_argument("--limit", type=int, default=20, help="最多挑多少条（默认 20）")
-    p.add_argument("--target", action="append", default=[],
-                   help="直接指定目标（不走库），可重复；与 --ids 一起用时库里的命中只作线索")
-    p.add_argument("--dry-run", action="store_true", help="只生成目标清单与线索雏形，不发请求")
-    p.add_argument("--litmus-bin", default="", help="litmus 可执行文件路径（默认自动找）")
-    p.add_argument("--ports", default="", help="转给 litmus 的 -p：top100/top1000/full/80,443")
-    p.add_argument("--litmus-arg", action="append", default=[], help="额外透传给 litmus 的参数，可重复")
-    p.set_defaults(func=cmd_strike)
-
-    p = sub.add_parser("summary", help="库总览")
-    p.set_defaults(func=cmd_summary)
-
-    p = sub.add_parser("engine", help="引擎与模式自检")
-    p.set_defaults(func=cmd_engine)
+    ap.set_defaults(func=cmd_status)
     return ap
 
 

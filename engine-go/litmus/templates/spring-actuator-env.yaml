@@ -1,0 +1,37 @@
+id: spring-actuator-env
+
+info:
+  name: Spring Boot Actuator /env 配置泄露
+  author: litmus
+  severity: high
+  description: |
+    /actuator/env 未做鉴权，直接返回全部配置项，其中常含数据库口令、
+    对象存储密钥、第三方 token 与内网地址。
+  reference:
+    - https://docs.spring.io/spring-boot/docs/current/reference/html/actuator.html
+  tags: springboot,actuator,exposure
+
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/actuator/env"
+      - "{{BaseURL}}/env"
+
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "propertySources"
+
+      - type: dsl
+        dsl:
+          - "status_code == 200"
+          - "len(body) > 100"
+
+    extractors:
+      - type: regex
+        name: sensitive_keys
+        part: body
+        regex:
+          - '(?i)"([A-Za-z0-9_.-]*(?:password|secret|token|accesskey)[A-Za-z0-9_.-]*)"'

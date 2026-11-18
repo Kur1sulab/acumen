@@ -1,0 +1,150 @@
+{
+  "diff_host_port": [
+    {
+      "check": "git-leak",
+      "evidence": "a",
+      "extra": {},
+      "host": "10.0.0.3",
+      "id": "LS-001",
+      "poc": "",
+      "port": 80,
+      "severity": "high"
+    },
+    {
+      "check": "git-leak",
+      "evidence": "b",
+      "extra": {},
+      "host": "10.0.0.3",
+      "id": "LS-002",
+      "poc": "",
+      "port": 8080,
+      "severity": "high"
+    },
+    {
+      "check": "git-leak",
+      "evidence": "c",
+      "extra": {},
+      "host": "10.0.0.4",
+      "id": "LS-003",
+      "poc": "",
+      "port": 80,
+      "severity": "high"
+    }
+  ],
+  "evidence_substring": [
+    {
+      "check": "tpl-phpinfo-exposure",
+      "evidence": "phpinfo() page at /info.php\n\n[另一路独立验证] phpinfo() page at /info.php; PHP Version 7.4.3",
+      "extra": {
+        "also_seen_by": [
+          "phpinfo-exposure"
+        ]
+      },
+      "host": "10.0.0.5",
+      "id": "LS-001",
+      "poc": "",
+      "port": 80,
+      "severity": "medium"
+    }
+  ],
+  "family_merge": [
+    {
+      "check": "tpl-git-config-disclosure",
+      "evidence": "matched at http://10.0.0.1:80/.git/config\n\n[另一路独立验证] GET /.git/config -> 200\n[core]\n\trepositoryformatversion = 0",
+      "extra": {
+        "also_seen_by": [
+          "git-leak"
+        ]
+      },
+      "host": "10.0.0.1",
+      "id": "LS-001",
+      "poc": "poc/git-leak.sh",
+      "port": 80,
+      "severity": "high"
+    }
+  ],
+  "poc_inherit": [
+    {
+      "check": "git-leak",
+      "evidence": "短证据\n\n[另一路独立验证] 长一点的证据在这里",
+      "extra": {
+        "also_seen_by": [
+          "tpl-git-config-disclosure"
+        ]
+      },
+      "host": "10.0.0.6",
+      "id": "LS-001",
+      "poc": "poc/git.sh",
+      "port": 80,
+      "severity": "high"
+    }
+  ],
+  "severity_wins": [
+    {
+      "check": "actuator-env",
+      "evidence": "200 env\n\n[另一路独立验证] 很长的模板证据很长的模板证据很长的模板证据很长的模板证据很长的模板证据很长的模板证据很长的模板证据很长的模板证据很长的模板证据很长的模板证据很长的模板证据很长的模板证据很长的模板证据很长的模板证据很长的模板证据很长的模板证据很长的模板证据很长的模板证据很长的模板证据很长的模板证据很长的模板证据很长的模板证据很长的模板证据很长的模板证据很长的模板证据很长的模板证据很长的模板证据很长的模板证据很长的模板证据很长的模板证据",
+      "extra": {
+        "also_seen_by": [
+          "tpl-spring-actuator-env"
+        ]
+      },
+      "host": "10.0.0.2",
+      "id": "LS-001",
+      "poc": "",
+      "port": 8080,
+      "severity": "critical"
+    }
+  ],
+  "sort_order": [
+    {
+      "check": "crit-a",
+      "evidence": "c2",
+      "extra": {},
+      "host": "10.0.0.1",
+      "id": "LS-001",
+      "poc": "",
+      "port": 80,
+      "severity": "critical"
+    },
+    {
+      "check": "crit-x",
+      "evidence": "c",
+      "extra": {},
+      "host": "10.0.0.9",
+      "id": "LS-002",
+      "poc": "",
+      "port": 80,
+      "severity": "critical"
+    },
+    {
+      "check": "med-x",
+      "evidence": "m",
+      "extra": {},
+      "host": "10.0.0.9",
+      "id": "LS-003",
+      "poc": "",
+      "port": 80,
+      "severity": "medium"
+    },
+    {
+      "check": "low-x",
+      "evidence": "l",
+      "extra": {},
+      "host": "10.0.0.9",
+      "id": "LS-004",
+      "poc": "",
+      "port": 80,
+      "severity": "low"
+    },
+    {
+      "check": "info-x",
+      "evidence": "i",
+      "extra": {},
+      "host": "10.0.0.9",
+      "id": "LS-005",
+      "poc": "",
+      "port": 80,
+      "severity": "info"
+    }
+  ]
+}

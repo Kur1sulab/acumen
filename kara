@@ -1,13 +1,14 @@
 #!/bin/sh
 # kara —— 空境 Kara 终端入口（薄壳）
 #
+#   kara                                   # 状态（引擎/库/存量）
 #   kara scan -t 127.0.0.1:8080 -m api     # 扫
 #   kara list --sev high                   # 看
-#   kara show 12                           # 详情 + 复现命令
+#   kara list -i 12                        # 详情 + 复现命令
 #   kara verify --ids 12                   # 复验
-#   kara export --format md -o report.md   # 导出
-#   kara summary / kara assets / kara engine
+#   kara verify --deep --sev high           # 深度验证（真发请求）
+#   kara list --md report.md               # 导出
 #
-# 不开端口、不起浏览器：Web 版仍然用 run.sh。
+# 单一 CLI 入口：不开端口、不起浏览器、没有其它界面。
 cd "$HOME/tools/kara" || exit 1
 exec python3 -m vc.cli "$@"

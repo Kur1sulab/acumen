@@ -3,6 +3,68 @@
 版本号按 [语义化版本](https://semver.org/lang/zh-CN/)：修 bug 走 patch，加能力走 minor，
 输出格式或数据库结构不兼容才走 major。
 
+## 1.8.0 — 2026-11-18
+
+### 变更 · 收敛成单一 CLI（去掉网页层）
+
+产品只有一个界面：命令行。网页那套（`vc/server.py`、`vc/ui/`、`run.sh`）整层移除，
+Windows 绿色版的启动器也从「起服务 + 自动开浏览器」改成直接跑 CLI。
+
+命令表压到三个动词，别的一律不进：
+
+```
+kara                                   # 状态：引擎、库、存量
+kara scan -t <目标> [-m 模式]           # 扫（-m strike = 深度验证）
+kara list [-i 序号] [--assets]          # 看（--csv / --md 导出）
+kara verify [--ids …] [--deep]         # 复验（--deep 用验证内核真打）
+```
+
+- 原先的 `show` / `assets` / `export` / `summary` / `engine` / `strike` / `ingest` 七个命令全部并入上面三个：
+  详情与资产进 `list`（`-i` / `--assets`），导出进 `list --csv|--md`，
+  状态与引擎自检进**裸命令**（不带子命令就打印），入账在 `scan` / `verify` 之后自动跑。
+- 库路径与收件箱默认值搬到 `vc/paths.py`：以前它们住在 server.py 里，删了服务那文件就该搬家。
+- 没有服务、没有端口、没有鉴权面；`--engine` 依旧可显式指定，指错就报错。
+
+### 修复
+
+- `asset` 是 `-`（白盒报告进来的条目）时被当成合法目标，`verify --deep` 会拿它去跑引擎然后报错；
+  现在 `-` / `unknown` 一律不当目标，直接说明「没有可回访目标」。
+
+### 测试
+
+- 123 个单测：新增「命令表只有三个动词」「裸命令打印状态」「list --assets」「verify --deep 的 dry-run
+  与无目标路径」「`kind=any` 目标校验」等用例；删掉网页路由那组测试（随服务层一起退役）。
+
+## 1.7.0 — 2026-11-18
+
+### 变更 · 执行内核内建，不再「移交」
+
+上一版把深度验证做成对外的移交（`vc/strike.py` 调外部 litmus 二进制）。那是过渡方案，
+这一版把它**并进 Kara 自己**：验证内核的源码落进 `engine-go/litmus/`（移植自 litmus2，
+零第三方依赖），跟指纹/敏感路径/API 一样是同一台引擎的子命令。
+
+- **第 9 个模式 `strike`**：`kara scan -t <目标> -m strike [--ports …] [--intensity …]`
+  产物 `out/<target>/strike/{findings.json,report.md,evidence/}`，由 `vc/parsers_sweep.py`
+  的新形状 `sweep_strike` 归一化入账——跟其它模式同一条流水线、同一套去重键、同样可复验。
+- **`kara strike` 语义改成「用内建内核真打」**：目标仍可从库里挑（`--sev/--ids/--limit`）
+  或直接给（`--target`），但不再需要任何外部二进制。`vc/strike.py` 已删除，不留两套逻辑漂移。
+- 目标校验新增 `kind=any`：既吃 `http://h:p/path` 也吃裸 `h:p`（验证内核两种都要），
+  仍挡注入形状与路径穿越，尾斜杠照旧剥掉。
+- 界面/终端不需要跟着变：网页版里它就是一个新模式，终端版就是 `-m strike`。
+
+### 为什么值得合
+
+只读模组给的是「可疑面」，验证内核给的是「能不能打进去、拿到了什么」。分成两个产品时，
+中间要手工搬 findings；合进一台引擎后，一次扫描里两种结论落在同一张表里；
+同一个去重键让「先扫后验」和「一次全跑」得出一致结果。
+
+### 测试
+
+- 122 个单测（`tests/test_strike_mode.py`：形状识别、0 命中也要认、`kind=any` 目标、
+  `--ports/--intensity` 透传给引擎、假引擎跑通「模式 → 产物 → 入账」全段）。
+- 实测：`kara scan -m strike` 打本地靶站 → 9 条（严重 3/L2、高危 1/L2…）全部入账；
+  `kara strike --sev critical` 复打同一目标 → 9 条全部合并进原条目（去重键生效）。
+
 ## 1.6.0 — 2026-11-18
 
 ### 新增 · `kara strike`：发现 → 验证 的移交

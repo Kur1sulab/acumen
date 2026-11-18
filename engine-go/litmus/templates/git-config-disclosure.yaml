@@ -1,0 +1,39 @@
+id: git-config-disclosure
+
+info:
+  name: .git 目录泄露（源码可还原）
+  author: litmus
+  severity: high
+  description: |
+    Web 根目录下的 .git 未做访问控制，攻击者可完整还原源码，
+    并从源码中提取数据库口令、签名密钥与内网地址。
+  reference:
+    - https://owasp.org/www-project-web-security-testing-guide/
+  tags: exposure,git,source
+
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/.git/HEAD"
+      - "{{BaseURL}}/.git/config"
+
+    matchers-condition: or
+    matchers:
+      - type: regex
+        part: body
+        regex:
+          - "^ref: refs/heads/[a-zA-Z0-9._/-]+"
+
+      - type: word
+        part: body
+        words:
+          - "[core]"
+          - "repositoryformatversion"
+
+    extractors:
+      - type: regex
+        name: branch
+        part: body
+        group: 1
+        regex:
+          - "ref: refs/heads/([a-zA-Z0-9._/-]+)"
