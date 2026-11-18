@@ -1,0 +1,230 @@
+# yata 内核 —— Go 引擎（零第三方依赖，单文件）
+
+把 Python 引擎（`src/yata.py` + `src/modules/`）按「语义忠实优先」移植到纯 Go，
+产出**单文件** `yata.exe`，CLI 子命令与 `python src/yata.py` 一一对齐。
+
+**移植边界（铁律）**：只有引擎自身的编排逻辑被重写（HTTP 数据源 / 软 404 基线 /
+存活验证 / 指纹匹配 / 输出解析 / 去重合并 / 安全落盘）；外部工具一律保持子进程
+调用、不重写——OneForAll（Python）仍是子域枚举主通道，subfinder（Go 二进制）
+只作可选补充通道（存在才用）。
+
+## 构建
+
+```bash
+cd engine-go
+C:/Go/go/bin/go.exe build -o yata.exe ./cmd/yata   # 标准布局入口（推荐）
+C:/Go/go/bin/go.exe build -o yata.exe .                # 根目录兼容入口，二进制等价
+C:/Go/go/bin/go.exe test ./...                              # 全部单测 + Python↔Go parity
+```
+
+- Go 1.24+；本仓库零第三方依赖，无需联网拉模块。
+- 入口逻辑在 `internal/cli`，`cmd/yata/main.go` 与根 `main.go` 是两个等价薄壳。
+- `go test` 全程零外网：crt.sh/certspotter 打 httptest stub，OneForAll 走
+  `testdata/oneforall_fake.py.txt` fixture，subfinder 用注入桩。
+
+## 子命令对照表（15 个，对齐 yata.py:137-213）
+
+| 子命令 | Python 对应 | Go 版状态 |
+|---|---|---|
+| `subdomain -d <domain> [--verify]` | `modules.subdomain.run_subdomain` | ✅ c1 已实现 |
+| `verify -d <domain> [-w 8]` | `modules.subdomain.run_verify` | ✅ c1 已实现 |
+| `fingerprint -u <url>` | `modules.fingerprint.run_fingerprint` | ✅ c1 已实现 |
+| `all -t <domain\|ip>` | `cmd_all` | ✅ 第三轮已实现（10 步编排，IP/域名两分支自动识别；jsintel/portscan 以非致命步骤接入，与 yata.py 步骤序一致） |
+| `asset -d` | `modules.asset` | ✅ c2（FOFA/Hunter 原生客户端，key 走环境变量） |
+| `reverse -i <ip>` | `modules.reverse_ip` | ✅ c2（hackertarget；域名正则改写为 RE2 兼容 label 校验） |
+| `icp -d` | `modules.icp` | ✅ c2（apihz；限频假 200 防御） |
+| `api -u` | `modules.api_unauth` | ✅ c2（27 端点清单 + 取证三件套） |
+| `paths -u` | `modules.paths` | ✅ c2（19 条字典 + 软 404 基线 + 复验） |
+| `jsintel -u` | `modules.jsintel` | ✅ 已移植（端点/敏感线索/域名三通道；值只留前 4 位打码；WAF 优雅降级；单测 + parity 24 项矩阵） |
+| `portscan -t` | `modules.portscan` | ✅ 已移植（96 端口常用表 + banner 轻量识别；并发 ≤32 / 超时 1.5s；`--ports 80,443,8000-8100`） |
+| `poc -t -p` | `modules.poc_engine`（YAML 引擎） | ✅ c2（gopkg.in/yaml.v3，仓库唯一第三方依赖） |
+| `patchdiff -r` | `modules.patchdiff` | ✅ 已移植（本地 git 子进程 + 12/8 条信号表 + semgrep 规则骨架；`--commit/--range/--limit/--emit-rule`；零外联） |
+| `llm -d` | ~~`modules.llm_assist`~~ | ❌ **不移植，弃用**（Python 版也已整体移除该模块，两侧行为一致：提示并 exit 2） |
+| `report -t` | `modules.report` | ✅ c2（资产档案 + 证据包 zip） |
+
+未实现命令打印「第 N 轮实现」并 exit 2；无参数打印 help 并 exit 1——**绝不静默
+走错分支**。
+
+## 目录结构
+
+```
+engine-go/
+├── main.go                  # 根兼容入口（薄壳）
+├── cmd/yata/main.go     # 标准布局入口（薄壳）；CLI 逻辑在 internal/cli
+├── internal/cli/            # 14 子命令分发表 + 进度事件流
+├── internal/netutil/        # fetch（HTTP 底座）/ urlcheck（SSRF 边界）/
+│                            # safeio（安全落盘）/ baseline（软404/存活复验）
+├── internal/toolrun/        # 外部工具子进程适配层（OneForAll 主 / subfinder 可选）
+├── internal/subdomain/      # 子域枚举（OneForAll→subfinder→crt.sh→certspotter）
+│                            # + 存活验证（DNS 全量 + HTTP 探活前 120）
+├── internal/fingerprint/    # 28 条指纹规则逐字移植（header/body 双通道）
+├── internal/asset/          # c2：FOFA/Hunter 资产测绘（key 走环境变量）
+├── internal/reverseip/      # c2：IP 反查域名（hackertarget）
+├── internal/icp/            # c2：ICP 备案查询（apihz，限频假 200 防御）
+├── internal/paths/          # c2：敏感路径探测（19 条字典 + 基线 + 复验）
+├── internal/apiunauth/      # c2：API 未授权探测（27 端点 + 取证三件套）
+├── internal/poc/            # c2：YAML POC 引擎（gopkg.in/yaml.v3）
+├── internal/report/         # c2：资产档案 render + 证据包 zip
+├── portscan/                # 常用端口扫描（96 端口表 + banner 识别；CLI portscan / all 步骤）
+├── patchdiff/               # 补丁差分 → 变种狩猎（git 子进程 + 信号表 + semgrep 规则骨架）
+├── internal/mockweb/        # httptest 靶站：与 tests/mock_server.py 逐字节对齐
+├── internal/parity/         # Python↔Go parity 测试基建 + c1/c2 断言矩阵
+└── testdata/                # OneForAll fixture（.txt 后缀合规）
+```
+
+## 关键语义（与 Python 逐字段对齐，parity 测试钉死）
+
+- **fetch**：协议白名单 http/https；先按 max_bytes 截断再算指纹（hex 前 16 位）；
+  body 是 utf-8 ignore 解码；4xx/5xx 同样算 `ok=true`；重定向最多 10 跳，超限
+  返回最后一个 30x（对齐 urllib HTTPError(302) 分支，重定向环 baseline=redirect
+  依赖它）；headers 键小写、同键多值后写覆盖。
+  **fix1 加固**：① error 字段剥离 `Get "URL": ` 前缀，只留原因文本（query 里
+  携带的 token/api_key 等不得经 error 字段进入日志与证据包，对齐 Python
+  `str(e)` 形态）；② `FetchOpt.HopCheck` 逐跳校验钩子——入口做过 CheckHTTPURL
+  的调用方（fingerprint / pick_base）传入同策略回调，302 落点不再免检（Python
+  侧可观测结果一致：解析失败的落点两引擎都按请求失败处理，跨 scheme 重定向
+  两侧协议栈都拒绝）。
+- **urlcheck（SSRF 边界）**：默认阻断 Python 3.8 `is_private/is_loopback/
+  is_link_local/is_reserved` 全集——Go 标准库 `net.IP.IsPrivate` 只有 RFC1918，
+  缺 198.18.0.0/15（Clash fake-ip 段）等 14 段，必须自实现；授权内网目标由调用方
+  显式 `allowPrivate=true` 放行。私网表有动态 python 探针单测逐 IP 对照。
+  **fix1 加固**：crt.sh / certspotter 通道在请求前先过 `CheckHTTPURL(allowPrivate=false)`
+  （对齐 Python `_from_crtsh`/`_from_certspotter`），校验失败走「异常降级」——
+  0 次重试直接切下一通道（此前 Go 侧无校验且 3 次退避重试，降级耗时/文案与
+  Python 漂移）。
+- **安全落盘**：文件名白名单 `[A-Za-z0-9._-]`、截 64、剥首尾点号；目录剔 `../`
+  与 `.` 组件；最终路径必须仍在 out 内才写盘。**fix1 加固**：Windows 保留设备名
+  主干（con/prn/aux/nul/com1-9/lpt1-9，任意扩展名）命中后主干补 `_`（与 Python
+  `safe_filename` 同步）。
+- **输出目录（make_outdir）**：`://` `/` `\` `:` `?` `&` `=` `"` `<` `>` `|` `*`
+  全部换 `_`，再剥首尾点/空格；空与 `..` 回 `unknown`；目录创建失败上抛（CLI
+  exit 1，对齐 Python makedirs 抛 OSError 未捕获）。三处实现（Go cli / Python
+  yata.py / desktop-go outDirFor）逐字符同规则，两引擎产物目录同名。
+- **--progress-file 全局参数（fix1 补齐）**：`yata --progress-file <path>
+  <子命令> ...`（或 `--progress-file=` 形态、环境变量 `RECON_PROGRESS_FILE` 兜底），
+  事件 JSONL 键序 `{ts,event,module,detail}` 与 `yata.py:31-62` 契约一致：
+  `pipeline_start → start → done|fail → pipeline_end`（all 无模块级事件；
+  help/无子命令/未知子命令不发事件）。桌面壳 Runner 靠它驱动任务状态机。
+- **verify 证据包形态（fix1 对齐）**：`subdomains_live.json` 死亡行 `ips:[]`、
+  `http:{}`，探活成功行 http 为完整六键对象——与 Python `verify_subs` 落盘形态
+  逐键一致（此前 Go 侧 nil slice 序列化为 null、零值探活为六字段空对象）。
+- **安全落盘**：文件名白名单 `[A-Za-z0-9._-]`、截 64、剥首尾点号；目录剔 `../`
+  与 `.` 组件；最终路径必须仍在 out 内才写盘。
+- **软 404 基线**：双随机探针分类 soft404 / uniform403 / redirect / normal /
+  unknown；命中必须复验（连续 2 次形态一致且特征仍在才算存活）。
+- **parity**：Python 与 Go 引擎打同一个 Go httptest 靶站，断言矩阵覆盖
+  baseline 五场景 / fetch 字段 / 指纹命中序列 / HTTPProbe / VerifySubs rows /
+  OneForAll 适配器。python 缺席时 parity 自动 skip，不阻塞纯 Go 测试。
+
+## 与 Python 版的已知微差（其余为零）
+
+1. **OneForAll 子进程超时**：Python 侧 `subprocess.TimeoutExpired` 会炸穿调用栈；
+   Go 侧打印告警后返回空、继续走降级链（更稳，语义等价于"该通道本次无结果"）。
+2. **重定向跟随实现**：Python urllib 逐跳构造请求、Go `net/http` 内建跟随，
+   均为最多 10 跳；慢响应下超时语义微差（socket 级 vs 整请求级），parity 按字段
+   不按耗时。
+3. **subfinder 通道是 Go 侧增强**（Python 版没有）：插在 OneForAll 之后做并集
+   补充，存在才用、失败只告警、不改变 Python 原降级链的触发条件。
+4. **行尾**：Go 写 LF，Python 在 Windows 写 CRLF；消费方一律按行解析，无影响。
+5. **重定向逐跳校验（fix1 起 Go 先行，fix2 全量接线）**：Go 全部 Follow 调用点
+  （fingerprint/pick_base/api/paths/poc/子域探活/取证复请求）经
+  `netutil.HopPolicy(入口)` 逐跳校验——策略由入口推导：**公网入口的 30x 落点
+  拒绝内网/环回/保留/链路本地地址**（堵 302 打进未授权内网段/云元数据），
+  **入口本身私网（授权内网靶标）则放行私网落点**；icp 数据源改 `Follow:false`
+  （id/key 在 query 是 apihz 接口契约，任何跟随都会把凭据转发给跳板）。
+  Python 侧维持 urllib 现状（无逐跳复验，TOCTOU 级已接受风险，见 netutil.py
+  docstring）；两引擎在 parity 矩阵覆盖的 127.0.0.1 靶站上可观测行为一致，
+  公网目标 + 可控 302 场景下 Go 拒绝/Python 跟随，属 Go 侧单向加固。
+6. **follow=False 语义相反（潜伏，零生产调用）**：Python `fetch(follow=False)`
+  实际仍跟随（build_opener(HTTPHandler) 不会移除默认 HTTPRedirectHandler）；
+  Go `Follow:false` 用 ErrUseLastResponse 真停 3xx。两侧生产代码当前无人传
+  no-follow；icp 是首个 no-follow 调用点（Go 侧），Python icp 已同步
+  `follow=False`——但 Python 该参数不生效，实际仍跟随，apihz 若 302 两引擎
+  落点不同（Go 停 3xx 不外发凭据，Python 跟随）。依赖此差异的场景须先修
+  Python HTTPRedirectHandler。
+7. **逐跳校验全域覆盖（fix3）**：Baseline/VerifyLive（api/paths 的基线探针与
+   存活复验）与 fingerprint/PickBase 全部统一 `HopPolicy(入口)`；Python 侧
+   baseline/verify_live 无逐跳校验——公网目标 + 可控 302 场景 Go 拒/Python 跟，
+   属 Go 侧单向加固（同 #5）。
+8. **写盘失败退出码（fix3）**：subdomain/api/paths/report 的产物写盘失败
+   Go 上抛 → exit 1 + fail 事件；此前吞错 exit 0 会被桌面壳标成"完成"。
+   Python safe_write 抛 ValueError → exit 1，两引擎对齐。
+9. **CLI 契约（fix3）**：`help` 子命令对齐 argparse 为未知选择 exit 2；
+   子命令内 `-h/--help` 打印用法后 exit 0；`--progress_file` 下划线别名移除
+  （仅精确 `--progress-file`）；重复旗标 last-wins（fix2 已对齐）。
+10. **错误信息脱敏（fix3）**：CheckHTTPURL/check_http_url 的「非法 URL」错误
+   只保留到 path（`?…` 截断）——query 可能携带 api-key 等凭据，畸形 env 值
+   触发解析失败时不得回显。两引擎同步。
+7. **icp 凭据门禁（fix2）**：未配置 APIHZ_ID/APIHZ_KEY 时两引擎都跳过查询
+  （0 请求，不再回落官方公开 demo 字面量）；domain 双侧经 URL 编码防参数注入。
+8. **CLI 输入校验（fix2，Go 侧 fail-closed）**：`reverse -i` 严格 IP、
+  `icp -d` 域名形状白名单在 CLI 入口拒绝（exit 2）；Python 侧维持原行为
+  （畸形参数照单拼入数据源 URL，由接口端报错）。重复旗标（-d/--domain 等）
+  两引擎均已 last-wins（fix2 对齐 argparse 语义）。
+
+## subfinder 可选通道
+
+存在才用：优先探测 `tools/bin/subfinder.exe`，再查 PATH。缺席时主降级链
+（OneForAll → crt.sh → certspotter）行为完全不变。下载（best-effort，可失败）：
+
+```bash
+mkdir -p tools/bin
+curl -L -o tools/bin/subfinder.zip \
+  "https://gh-proxy.com/https://github.com/projectdiscovery/subfinder/releases/latest/download/subfinder_windows_amd64.zip"
+# 解压出 subfinder.exe 放 tools/bin/；版本会记录到 tools/bin/VERSIONS.md
+```
+
+## 实测白名单红线（务必遵守）
+
+自动化测试只打本机 httptest/mock 靶站。**真实目标实测仅限人工验收**，且只允许：
+- 运维者**自有**的站点与服务器（真实域名/IP 不写入本公开文档；自用清单另行保管）
+- 本机 `127.0.0.1` mock / httptest 靶站
+
+禁打任何其他真实目标。DNS 锚点一律用 `127.0.0.1` 字面量——Clash fake-ip 环境下
+假域名会"解析成功"（198.18.0.0/15），禁止依赖 NXDOMAIN 断言。
+
+## serve 包（Web 控制台后端）
+
+`yata serve` 的实现在 `serve/`：把 subdomain / portscan / fingerprint / paths /
+apiunauth 编排成可观测任务，用 HTTP + SSE 暴露给 `serve/web/`（`go:embed` 进二进制，
+零外部前端依赖）。
+
+- `serve/job.go` —— 任务状态机、日志环形缓冲、SSE 广播、内存任务表
+- `serve/pipeline.go` —— 流水线编排（IP 目标跳子域两步；显式端口并进扫描清单）
+- `serve/serve.go` —— 路由 / 静态资源 / SSE / 报告导出
+- `serve/ai.go` —— 可选 AI 研判（OpenAI 兼容，默认关闭，可指向本地端点）
+- `serve/web/` —— 单页前端（深色毛玻璃、桌面级密度、中文枚举映射）
+
+测试（`serve/serve_test.go`）用 `mockweb.DemoHandler()` 起本地靶站做端到端：
+子域/存活两步通过 `subsFn`/`verifyFn` 注入桩，**不联 crt.sh、不打外网**；
+断言路径/API 必须真有命中、计数器与结果一致、步骤都落在终态。
+
+## llm 模块：Go 版不提供
+
+`llm` 子命令（`modules.llm_assist`，LLM 辅助解读）在 Go 版**不移植**：属可选
+增强、依赖外部 LLM 接口，与"纯 Go 单文件、零外网依赖"的引擎定位冲突。Python
+版已同步移除该模块（`modules/llm_assist.py` 已删除）——该功能需要向第三方服务
+发送扫描数据，与数据不出本机的红线冲突，两侧都不再提供。终修轮起 Go CLI 的
+`llm` 弃用占位槽位一并删除（公开面不保留 AI 词汇）：`yata llm` 按未知
+子命令处理（exit 2，无事件流）。
+
+**AI 的现行位置**：只存在于 `yata serve` 的 `AI 研判`（`serve/ai.go`），
+默认关闭、显式配置 `YATA_AI_BASE/KEY/MODEL` 才启用，只发压缩后的实测摘要
+（不含原始响应体与凭据值），可指向本地推理端点以保证数据不出本机。CLI 侧
+仍然没有、也不会加 `llm` 子命令。
+
+## 进程内嵌入契约（第三方消费方必读）
+
+engine-go 是公开 Go 模块，各 `Run*Context` 可在第三方进程内直接调用。嵌入方
+须自知两条契约：
+
+1. **panic 边界**：库内只在自有 goroutine 的入口处兜底（baseline 聚合器的
+   检查 goroutine 一处 recover）。按 Go 库惯例，引擎函数在敌意远端数据下
+   仍可能 panic，且检查内部 worker goroutine（如 dnsrec 池）不在库内兜底面
+   ——**嵌入方必须在自己的 goroutine 边界 recover**（桌面壳即如此：任务
+   job goroutine 单点 recover，任一模块 panic 只失败本任务不拖死宿主）。
+2. **包级词表为只读约定**：`apiunauth.Endpoints`、`fingerprint.Rules`、
+   `paths.PathsList`、`baseline.CheckLabels`、`geoasn.GeoSources` 等扫描用
+   词表/判定表当前以导出 var 形态公开（运行中改写=数据竞争且影响并发任务）。
+   仓库内零写入点；未来若收紧将改为函数访问器（ breaking change 会在
+   CHANGELOG 注明），嵌入方请勿写。

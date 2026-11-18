@@ -12,3 +12,9 @@ _probe_*
 pr-body-*.md
 build/
 dist/
+
+# 引擎构建产物（源码在 engine-go/，用 README 里的命令重建）
+engine/sweep
+engine/sweep.exe
+engine-go/out/
+engine-go/sweep

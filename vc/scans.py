@@ -95,14 +95,19 @@ def _valid_target(t: str, kind: str) -> str:
         raise ScanError("目标为空")
     if len(t) > 300:
         raise ScanError("目标过长（>300 字符）")
+    head = ""
     if "://" in t:
         scheme, rest = t.split("://", 1)
         if scheme.lower() not in ("http", "https"):
             raise ScanError("只支持 http/https 目标")
         if kind != "url":
             raise ScanError("该模式吃域名/IP，不要带 http:// 前缀")
+        head = scheme.lower() + "://"
     else:
         rest = t
+    if kind == "url":
+        # 从浏览器地址栏复制来的 URL 几乎都带尾斜杠，那是合法目标，不该被拒收
+        rest = rest.rstrip("/") or rest
     allowed = _URL_CHARS if kind == "url" else _HOST_CHARS
     bad = sorted({c for c in rest if c not in allowed})
     if bad:
@@ -112,7 +117,7 @@ def _valid_target(t: str, kind: str) -> str:
     if rest.startswith((".", "-", "/")) or rest.endswith((".", "-", "/")):
         raise ScanError("目标不能以 . - / 开头或结尾")
     if kind == "url":
-        return t if "://" in t else "https://" + rest
+        return (head or "https://") + rest
     if kind == "domain" and ("[" in rest or ":" in rest):
         raise ScanError("该模式只吃域名，不要带端口")
     return rest
@@ -275,12 +280,19 @@ class ScanManager:
         ok = bool(self.engine)
         ver = ""
         if ok:
-            try:
-                cp = subprocess.run([self.engine], capture_output=True, text=True, timeout=5)
-                first = [ln for ln in (cp.stdout or "").splitlines() if "sweep" in ln]
-                ver = (first[0] if first else "").strip()[:120]
-            except Exception:
-                ver = ""
+            # 先问 `version` 子命令；问不出来再退回无参输出的横幅。
+            # 无参直接打印的还是帮助文本——第一行含 sweep 的是用法标题，不是版本号。
+            for argv in ([self.engine, "version"], [self.engine]):
+                try:
+                    cp = subprocess.run(argv, capture_output=True, text=True, timeout=5)
+                except Exception:
+                    continue
+                lines = [ln for ln in (cp.stdout or "").splitlines() if "sweep" in ln]
+                picked = next((ln for ln in lines if re.search(r"\bv?\d+\.\d+\.\d+", ln)), "")
+                picked = picked or (lines[0] if lines else "")
+                ver = picked.strip()[:120]
+                if ver:
+                    break
         return {
             "engine": {"path": self.engine, "ok": ok, "version": ver,
                        "hint": "" if ok else ENGINE_HINT},

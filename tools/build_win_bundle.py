@@ -353,9 +353,9 @@ def main() -> int:
     if engine is None:
         raise SystemExit(
             "[X] 没找到 Windows 引擎。先交叉编译一次：\n"
-            "  cd ~/tools/sweep/engine-go && "
+            "  cd " + str(ROOT / "engine-go") + " && "
             "GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath "
-            "-ldflags '-s -w' -o " + str(ROOT / "build" / "sweep-win64.exe") + " ./cmd/atlas")
+            "-ldflags '-s -w' -o " + str(ROOT / "build" / "sweep-win64.exe") + " ./cmd/sweep")
     out_dir = (ROOT / args.out).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
