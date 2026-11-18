@@ -103,11 +103,11 @@
     if (root) root.dataset.view = state.tab || 'findings';
     const m = VIEW_META[state.tab] || VIEW_META.findings;
     const t = $('#pageTitle'), c = $('#pageCode'), d = $('#pageDesc'), cr = $('#crumbNow');
-    if (t) t.textContent = m[0];
+    if (t) t.textContent = '漏扫控制台';
     if (c) c.textContent = m[1];
-    if (d) d.textContent = m[2];
+    if (d) d.textContent = m[0] + ' · ' + m[2];
     if (cr) cr.textContent = m[0];
-    document.title = m[0] + ' · 漏扫控制台';
+    document.title = '漏扫控制台 · Vuln Console';
   }
 
   // 状态分段与筛选下拉必须同源，否则会出现「上面写着待审查、下拉却是全部」的自相矛盾
@@ -325,13 +325,13 @@
         <div class="acard-host" title="${esc(a.host)}">${esc(a.host)}</div>
         ${badge}
       </div>
-      ${sub.length ? `<div class="acard-sub">${sub.join('<span class="sep">·</span>')}</div>` : ''}
+      ${sub.length ? `<div class="acard-sub">${sub.join('<span class="sep" aria-hidden="true">·</span>')}</div>` : ''}
       ${title}
       ${ports.length ? `<div class="pchips">${chips}${more}</div>` : '<div class="acard-nop">没有端口信息</div>'}
       ${bar ? `<div class="mixbar">${bar}</div>` : ''}
       <div class="acard-foot">
         <span class="n">${a.n_find ? a.n_find + ' 条漏洞' : '暂无漏洞'}</span>
-        <span class="sep">·</span><span class="mono">${esc(a.sources || '—')}</span>
+        <span class="sep" aria-hidden="true">·</span><span class="mono">${esc(a.sources || '—')}</span>
         <span class="grow"></span>
         <span class="mono" title="${esc(a.last_seen || '')}">${esc(ago(a.last_seen))}</span>
         <span class="go" aria-hidden="true">›</span>

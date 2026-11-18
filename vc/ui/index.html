@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>漏洞管理 · Vuln Console</title>
+<title>漏扫控制台 · Vuln Console</title>
 <link rel="stylesheet" href="/ui/style.css">
 </head>
 <body>
@@ -67,7 +67,7 @@
   <!-- ============ 主区 ============ -->
   <main class="main">
     <header class="topbar">
-      <div class="crumb">漏扫控制台 <span class="sep">/</span> <b id="crumbNow">漏洞管理</b></div>
+      <div class="crumb">漏扫控制台 <span class="sep" aria-hidden="true">/</span> <b id="crumbNow">漏洞管理</b></div>
       <div class="top-actions">
         <span class="top-meta" id="topMeta"></span>
         <button id="btnRescan" class="btn primary" title="增量摄入：只解析新增或改动的文件">整理数据</button>
@@ -79,7 +79,7 @@
 
     <div class="page" id="pageRoot" data-view="findings">
       <div class="page-head">
-        <h1><span id="pageTitle">漏洞管理</span> <span class="code" id="pageCode">/VULN</span></h1>
+        <h1><span id="pageTitle">漏扫控制台</span> <span class="code" id="pageCode">/VULN</span></h1>
         <p id="pageDesc">查看和管理所有扫描发现的漏洞</p>
       </div>
 

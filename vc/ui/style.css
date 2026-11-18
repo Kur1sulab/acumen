@@ -24,8 +24,8 @@
 
   --fg: #0f172a;
   --fg-dim: #334155;
-  --muted: #64748b;   /* 白底 4.72:1 */
-  --faint: #8b95a6;   /* 白底 4.5:1 —— 小字元信息也过 AA */
+  --muted: #556274;   /* 白底 6.20:1 */
+  --faint: #606c80;   /* 白底 5.31 / 浅灰底 4.82 —— 10.5px 元信息也过 AA */
 
   --accent: #4f46e5;
   --accent-hi: #4338ca;
@@ -36,11 +36,12 @@
   --accent-glow: rgba(79, 70, 229, 0.16);
 
   /* 严重度：浅底 + 同色字，跟天穹的标签一个路子（不描边） */
-  --crit: #dc2626;  --crit-soft: #fef2f2;  --crit-line: #fecaca;
-  --high: #ea580c;  --high-soft: #fff7ed;  --high-line: #fed7aa;
-  --med:  #d97706;  --med-soft:  #fffbeb;  --med-line:  #fde68a;
+  --crit: #c81e1e;  --crit-soft: #fef2f2;  --crit-line: #fecaca;  /* 4.5+ on soft/white */
+  --high: #c2410c;  --high-soft: #fff7ed;  --high-line: #fed7aa;
+  --med:  #a16207;  --med-soft:  #fffbeb;  --med-line:  #fde68a;
   --low:  #2563eb;  --low-soft:  #eff6ff;  --low-line:  #bfdbfe;
-  --info: #3b82f6;  --info-soft: #eff6ff;  --info-line: #dbeafe;
+  --info: #0369a1;  --info-soft: #eff6ff;  --info-line: #dbeafe;
+  --ok:   #15803d;  /* 状态绿：白底 5.02 */
 
   --fill: #ffffff;
   --fill-2: #f8fafc;
@@ -51,7 +52,7 @@
   --scroll: #cbd5e1;
   --ep: #475569;
   --log-i: #334155;
-  --log-d: #94a3b8;
+  --log-d: #606c80;
 
   --shadow-1: 0 1px 2px rgba(15, 23, 42, 0.04);
   --shadow-2: 0 1px 3px rgba(15, 23, 42, 0.06), 0 4px 12px -6px rgba(15, 23, 42, 0.08);
@@ -88,8 +89,8 @@
 
   --fg: #e7eaf0;
   --fg-dim: #b8c0cf;
-  --muted: #8e98ab;
-  --faint: #6e7889;
+  --muted: #9aa4b6;
+  --faint: #828c9f;
 
   --accent: #818cf8;
   --accent-hi: #a5b4fc;
@@ -104,6 +105,7 @@
   --med:  #fbbf24;  --med-soft:  rgba(251, 191, 36, 0.12);   --med-line:  rgba(251, 191, 36, 0.28);
   --low:  #60a5fa;  --low-soft:  rgba(96, 165, 250, 0.12);   --low-line:  rgba(96, 165, 250, 0.28);
   --info: #7dd3fc;  --info-soft: rgba(125, 211, 252, 0.12);  --info-line: rgba(125, 211, 252, 0.26);
+  --ok:   #4ade80;
 
   --fill: #1a1f2a;
   --fill-2: #1c222d;
@@ -114,7 +116,7 @@
   --scroll: #2c3442;
   --ep: #9aa5b8;
   --log-i: #b8c0cf;
-  --log-d: #6e7889;
+  --log-d: #828c9f;
 
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.3);
   --shadow-2: 0 2px 8px rgba(0, 0, 0, 0.4);
@@ -405,7 +407,7 @@ a { color: inherit; }
   min-width: 0;
 }
 
-.crumb .sep { color: var(--line-strong); }
+.crumb .sep { color: var(--muted); }
 
 .crumb b { color: var(--fg-dim); font-weight: 550; }
 
@@ -580,9 +582,9 @@ a { color: inherit; }
 .six.medium .hd, .six.medium .ft { color: var(--med); }
 .six.lowinfo .hd, .six.lowinfo .ft { color: var(--low); }
 .six.todo .hd, .six.todo .ft { color: var(--muted); }
-.six.done .hd, .six.done .ft { color: #16a34a; }
+.six.done .hd, .six.done .ft { color: var(--ok); }
 
-:root[data-theme="dark"] .six.done .hd, :root[data-theme="dark"] .six.done .ft { color: #4ade80; }
+
 
 /* ---------------------------------------------------------------- 状态分段 */
 
@@ -1067,12 +1069,12 @@ a { color: inherit; }
 
 .status-select:focus { border-color: var(--accent-line); box-shadow: var(--ring); background: var(--fill); }
 
-.status-select[data-s="已确认"] { color: #16a34a; }
+.status-select[data-s="已确认"] { color: var(--ok); }
 .status-select[data-s="误报"] { color: var(--faint); }
 .status-select[data-s="已修复"] { color: var(--accent); }
 .status-select[data-s="已忽略"] { color: var(--faint); }
 
-:root[data-theme="dark"] .status-select[data-s="已确认"] { color: #4ade80; }
+
 
 /* 分页 */
 
