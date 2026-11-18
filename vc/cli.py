@@ -479,10 +479,7 @@ def _verify_deep(ctx: Ctx, rows: List[Dict[str, Any]], args: argparse.Namespace)
         print(_c(f"[!] {exc}", "31"), file=sys.stderr)
         return 2
 
-    mgr = ctx.manager(mode_args=_mode_args(args))
-    if not mgr.engine:
-        print(_c(sc.ENGINE_HINT, "31"), file=sys.stderr)
-        return 2
+    # dry-run 只列清单、不碰引擎：CI 里没有引擎二进制也该能过
     if args.dry_run:
         print(f"{_c('空境 · Kara', '1')} v{__version__}　深度验证（dry-run）")
         print(f"  目标 {len(targets)} 个")
@@ -490,6 +487,11 @@ def _verify_deep(ctx: Ctx, rows: List[Dict[str, Any]], args: argparse.Namespace)
             print(f"  {i:>2}. {t}")
         print("\n--dry-run：没有发起任何请求。去掉它就跑。")
         return 0
+
+    mgr = ctx.manager(mode_args=_mode_args(args))
+    if not mgr.engine:
+        print(_c(sc.ENGINE_HINT, "31"), file=sys.stderr)
+        return 2
 
     before = ctx.store.conn.execute("SELECT COALESCE(MAX(id),0) c FROM findings").fetchone()["c"]
     print(f"{_c('空境 · Kara', '1')} v{__version__}　深度验证")
