@@ -289,9 +289,8 @@ class Store:
                 """SELECT title, COUNT(*) n, MAX(sev_rank) r FROM findings
                    GROUP BY title ORDER BY r DESC, n DESC LIMIT 12""").fetchall()]
             last = self.conn.execute("SELECT MAX(scanned_at) t FROM files").fetchone()["t"]
-            by_verify = [dict(r) for r in self.conn.execute(
-                "SELECT verify_state, COUNT(*) n FROM findings GROUP BY verify_state").fetchall()]
             repro_n = self.conn.execute("SELECT COUNT(*) c FROM findings WHERE repro<>''").fetchone()["c"]
+        by_verify = self.verify_stats()   # 锁是 RLock，放在 with 外面只为读着清楚
         sev_counts = {s: 0 for s in SEV_ORDER}
         hits = {s: 0 for s in SEV_ORDER}
         for r in sev_rows:
@@ -491,6 +490,7 @@ class Store:
         return n
 
     def verify_stats(self) -> List[Dict[str, Any]]:
+        """按复验结论分组计数（summary() 用它填 by_verify）。"""
         with self.lock:
             return [dict(r) for r in self.conn.execute(
                 "SELECT verify_state, COUNT(*) n FROM findings GROUP BY verify_state").fetchall()]
