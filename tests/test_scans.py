@@ -21,9 +21,9 @@ from vc.scans import (MODES, ScanError, ScanManager, find_engine,  # noqa: E402
 from vc.store import Store                # noqa: E402
 
 FAKE_ENGINE = r"""#!/bin/sh
-# 假 recon-go：解析 --progress-file，按模块发事件，写一条 nuclei 形状的产物。
+# 假 mappa：解析 --progress-file，按模块发事件，写一条 nuclei 形状的产物。
 # 无参数时只报版本（真引擎的 meta() 探测会这么调，别在这里落文件）。
-if [ $# -eq 0 ]; then echo "recon-go — fake engine for tests (0.0.1)"; exit 0; fi
+if [ $# -eq 0 ]; then echo "mappa — fake engine for tests (0.0.1)"; exit 0; fi
 PROG=""; TARGET=""; prev=""
 for a in "$@"; do
   if [ "$prev" = "--progress-file" ]; then PROG="$a"; fi
@@ -48,7 +48,7 @@ exit 0
 
 
 def make_engine(dirpath: str) -> str:
-    p = os.path.join(dirpath, "recon-go")
+    p = os.path.join(dirpath, "mappa")
     with open(p, "w", encoding="utf-8") as f:
         f.write(FAKE_ENGINE)
     os.chmod(p, os.stat(p).st_mode | stat.S_IXUSR)
@@ -151,7 +151,7 @@ class ScanCase(unittest.TestCase):
         self.assertIn("all", [x["id"] for x in m["modes"]])
 
     def test_start_without_engine(self):
-        mgr = ScanManager(self.db, self.inbox, engine="/nonexistent/recon-go")
+        mgr = ScanManager(self.db, self.inbox, engine="/nonexistent/mappa")
         with self.assertRaises(ScanError):
             mgr.start("all", ["a.com"])
 

@@ -280,7 +280,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--open", action="store_true", help="启动后自动打开浏览器")
     ap.add_argument("--no-watch", action="store_true", help="关闭后台自动摄入")
     ap.add_argument("--scan", action="store_true", help="只在命令行跑一次摄入然后退出")
-    ap.add_argument("--engine", default="", help="recon-go 可执行文件路径（默认自动查找）")
+    ap.add_argument("--engine", default="", help="mappa 可执行文件路径（默认自动查找）")
     ap.add_argument("--scan-timeout", type=int, default=900, help="单目标扫描超时秒数")
     ap.add_argument("--scan-parallel", type=int, default=2, help="同时跑几个目标（上限 4）")
     ap.add_argument("--no-scan-control", action="store_true", help="关闭界面里的扫描控制")
@@ -324,7 +324,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if STATE.scans.engine:
             print(f"[acumen] 扫描引擎: {STATE.scans.engine}")
         else:
-            print("[acumen] 扫描引擎: 未找到 recon-go —— 界面里扫描按钮会提示构建命令")
+            print("[acumen] 扫描引擎: 未找到 mappa —— 界面里扫描按钮会提示构建命令")
     if args.open:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     try:

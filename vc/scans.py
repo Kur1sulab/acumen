@@ -1,4 +1,4 @@
-"""扫描控制（Scan Control）—— 把本机 recon-go 引擎接进控制台。
+"""扫描控制（Scan Control）—— 把本机 mappa 引擎接进控制台。
 
 边界（延续 v1 的本地/只读基调，扫的是哥哥授权的目标，控制面只在本机）：
   * 零三方依赖，只用标准库；引擎是本地二进制，subprocess **列表参数**启动，绝不拼 shell；
@@ -26,7 +26,7 @@ import time
 
 # ---------------------------------------------------------------- 模式表
 
-# flag 与 recon-go 子命令一一对应（见 recon-go help）：
+# flag 与 mappa 子命令一一对应（见 mappa help）：
 #   all/portscan 吃 -t（域名或 IP 都行）；fingerprint/api/paths/jsintel 吃 -u；
 #   baseline/subdomain 吃 -d。
 MODES = {
@@ -69,9 +69,9 @@ MAX_PARALLEL = 4
 DEFAULT_PARALLEL = 2
 DEFAULT_TIMEOUT = 900
 LOG_KEEP = 900          # 内存里保留的日志行数
-ENGINE_HINT = ("未找到 recon-go 引擎。构建一次即可：\n"
-               "  cd ~/tools/src-recon-tool/engine-go && "
-               "go build -o ~/.local/bin/recon-go ./cmd/recon-go")
+ENGINE_HINT = ("未找到 mappa 引擎。构建一次即可：\n"
+               "  cd ~/tools/mappa/engine-go && "
+               "go build -o ~/.local/bin/mappa ./cmd/mappa")
 
 
 class ScanError(Exception):
@@ -149,7 +149,7 @@ def normalize_targets(mode: str, raw) -> list:
 # ---------------------------------------------------------------- 引擎发现
 
 def find_engine(explicit: str = "") -> str:
-    """按优先级找 recon-go 二进制；找不到返回空串。
+    """按优先级找 mappa 二进制；找不到返回空串。
 
     显式指定（--engine / VC_RECON_BIN）时**只认它**——指错了就明确报找不到，
     免得悄悄换成另一个二进制跑，排查时看不到真相。
@@ -159,10 +159,10 @@ def find_engine(explicit: str = "") -> str:
         return p if os.path.isfile(p) and os.access(p, os.X_OK) else ""
     cands = [
         os.environ.get("VC_RECON_BIN", ""),
-        shutil.which("recon-go") or "",
-        "~/.local/bin/recon-go",
-        "~/tools/src-recon-tool/engine-go/recon-go",
-        "~/go/bin/recon-go",
+        shutil.which("mappa") or "",
+        "~/.local/bin/mappa",
+        "~/tools/mappa/engine-go/mappa",
+        "~/go/bin/mappa",
     ]
     for c in cands:
         if not c:
@@ -259,7 +259,7 @@ class ScanManager:
         if ok:
             try:
                 cp = subprocess.run([self.engine], capture_output=True, text=True, timeout=5)
-                first = [ln for ln in (cp.stdout or "").splitlines() if "recon-go" in ln]
+                first = [ln for ln in (cp.stdout or "").splitlines() if "mappa" in ln]
                 ver = (first[0] if first else "").strip()[:120]
             except Exception:
                 ver = ""
