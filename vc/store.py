@@ -227,8 +227,18 @@ class Store:
                     except json.JSONDecodeError:
                         ports = []
                     if a.get("port") not in (None, ""):
-                        if not any(p.get("port") == a.get("port") and p.get("proto") == a.get("proto") for p in ports):
+                        # 端口去重时把「空 proto」当通配：同一个 8899 先由敏感路径记过
+                        # （只知道能访问），再由端口扫描补上 tcp 协议，否则会重复两行。
+                        same = next((p for p in ports
+                                     if p.get("port") == a.get("port")
+                                     and (not p.get("proto") or not a.get("proto")
+                                          or p.get("proto") == a.get("proto"))), None)
+                        if same is None:
                             ports.append(port_entry)
+                        else:
+                            for k in ("proto", "service", "title"):
+                                if not same.get(k) and port_entry.get(k):
+                                    same[k] = port_entry[k]
                     self.conn.execute(
                         """UPDATE assets SET ip=COALESCE(NULLIF(?,''),ip), ports=?, services=?,
                                title=COALESCE(NULLIF(?,''),title), fingerprint=COALESCE(NULLIF(?,''),fingerprint),
@@ -365,12 +375,20 @@ class Store:
             if (a["ls"] or "") > item["last"]:
                 item["last"] = a["ls"] or ""
 
+        mix_by_host: Dict[str, Dict[str, int]] = {}
         for host, item in risk.items():
             d = by_host.get(host)
+            # 漏洞侧的资产名可能带端口（1.2.3.4:8899），资产表按主机名存。
+            # 同一台机器的两种写法必须合并成一张卡：否则页面上会出现两张卡，
+            # 一张有端口没漏洞、一张有漏洞没端口，看着像两台机器。
+            if d is None and ":" in str(host):
+                bare = str(host).rsplit(":", 1)[0]
+                if bare in by_host:
+                    d = by_host[bare]
             if d is None:
                 if q and q.lower() not in str(host).lower():
                     continue
-                covered = {int(p.get("port") or 0) for p in ([] if d is None else d["ports"])}
+                covered = set()
                 d = {
                     "host": host, "ip": host if re.match(r"^\d+\.\d+\.\d+\.\d+$", host) else "",
                     "ports": [{"port": p, "proto": "tcp", "service": ""}
@@ -389,9 +407,13 @@ class Store:
                     d["last_seen"] = item["last"]
                 if not d.get("sources"):
                     d["sources"] = ",".join(sorted(item["sources"]))
+            # 严重度分布按「合并后」的主机名累计，否则合并过的卡会显示 0 条漏洞
+            bucket = mix_by_host.setdefault(d["host"], {})
+            for k, v in (item["mix"] or {}).items():
+                bucket[k] = bucket.get(k, 0) + v
 
         for d in out:
-            m = (risk.get(d.get("host") or "") or {}).get("mix") or {}
+            m = mix_by_host.get(d.get("host") or "") or {}
             d["sev_mix"] = {k: m.get(k, 0) for k in self.SEV_ORDER}
             d["n_find"] = sum(d["sev_mix"].values())
             d["top_sev"] = next((k for k in self.SEV_ORDER if d["sev_mix"][k]), "")

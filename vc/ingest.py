@@ -41,6 +41,12 @@ class Ingestor:
         for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
             if dirpath.count(os.sep) - root_depth >= MAX_DEPTH:
                 dirnames[:] = []
+            # 引擎自己的运行时目录（scan-*/progress 进度事件、scan-*/logs 原始日志）
+            # 不是扫描产物：解析它们只会往收件箱里塞一堆「格式无法识别」的噪音。
+            parent = os.path.basename(os.path.dirname(dirpath))
+            if os.path.basename(dirpath) in ("progress", "logs") and parent.startswith("scan-"):
+                dirnames[:] = []
+                continue
             dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
             for name in filenames:
                 if os.path.splitext(name)[1].lower() not in EXT_WHITELIST:
@@ -99,13 +105,17 @@ class Ingestor:
             self.store.log("warn", f"stat 失败 {path}：{exc}")
             return
         prev = self.store.file_state(path)
-        if not force and prev and abs(prev["mtime"] - st.st_mtime) < 1e-6 and prev["size"] == st.st_size:
+        # 缓存键带解析器代次：解析逻辑升级后（PARSER_GEN +1）旧指纹自然失效，
+        # 全部产物重解析一次，用户不用记得加 --force。
+        same_gen = bool(prev) and str(prev.get("digest") or "").startswith(f"g{parsers.PARSER_GEN}:")
+        if (not force and same_gen and prev
+                and abs(prev["mtime"] - st.st_mtime) < 1e-6 and prev["size"] == st.st_size):
             stats["unchanged"] += 1
             return
 
         digest = ""
         try:
-            digest = parsers.file_fingerprint(path)
+            digest = parsers.gen_digest(path)
         except OSError as exc:
             stats["errors"] += 1
             self.store.log("warn", f"读取失败 {path}：{exc}")

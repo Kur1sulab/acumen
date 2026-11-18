@@ -13,6 +13,7 @@ r"""绿色版冒烟测试：用「当前解释器」把服务真跑起来，打 
 
 from __future__ import annotations
 
+import json
 import os
 import socket
 import subprocess
@@ -51,6 +52,31 @@ def fail(msg: str) -> int:
     return 1
 
 
+def check_engine() -> tuple[str, int]:
+    """检查包内引擎。返回 (人话结论, 是否致命)。
+
+    为什么单独查：绿色版最容易出的问题不是服务起不来，而是**引擎没进包**——
+    界面照常打开、扫描页却永远显示「没找到扫描引擎」，用户会当成软件坏了。
+    所以这里既查文件在不在，也查它是不是真的 Windows PE（7z 断掉、杀软隔离、
+    只拷了个 0 字节占位文件都会在这里露出来）。
+    """
+    eng_dir = ROOT / "engine"
+    if not eng_dir.is_dir():
+        return "源码目录：跳过（引擎按 PATH 找）", 0
+    for name in ("sweep.exe", "sweep"):
+        p = eng_dir / name
+        if not p.is_file():
+            continue
+        size = p.stat().st_size
+        if size < 1_000_000:
+            return f"engine/{name} 只有 {size:,} 字节，八成不是真二进制", 1
+        head = p.open("rb").read(2)
+        if name.endswith(".exe") and head != b"MZ":
+            return f"engine/{name} 头两字节是 {head!r}，不是 PE 文件", 1
+        return f"engine/{name} 就位，{size / 1048576:.1f} MB", 0
+    return "engine/ 目录在，但里面没有 sweep 二进制", 1
+
+
 def main() -> int:
     _force_utf8_stdout()
     port = free_port()
@@ -79,6 +105,11 @@ def main() -> int:
     print(f"临时库 : {db}")
     print("-" * 62)
 
+    eng_msg, eng_fatal = check_engine()
+    print(f"[0/4] 引擎 -> {eng_msg}")
+    if eng_fatal:
+        return fail("包内引擎缺失或损坏，这个包扫不了东西")
+
     proc = subprocess.Popen(
         cmd, cwd=str(ROOT), env=env,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -97,7 +128,7 @@ def main() -> int:
             try:
                 with urllib.request.urlopen(base_url + "/api/health", timeout=2) as r:
                     health = r.read().decode("utf-8", "replace")
-                    print(f"[1/3] GET /api/health -> HTTP {r.status}")
+                    print(f"[1/4] GET /api/health -> HTTP {r.status}")
                     print(f"      响应 {health[:300]}")
                     if r.status != 200:
                         return fail("健康检查非 200")
@@ -119,11 +150,21 @@ def main() -> int:
             html = r.read().decode("utf-8", "replace")
         if r.status != 200 or len(html) < 500:
             return fail(f"首页异常 HTTP {r.status} / {len(html)} 字节")
-        print(f"[2/3] GET / -> HTTP {r.status}, 首页 {len(html):,} 字节")
+        print(f"[2/4] GET / -> HTTP {r.status}, 首页 {len(html):,} 字节")
 
         with urllib.request.urlopen(base_url + "/api/summary", timeout=8) as r:
             summary = r.read().decode("utf-8", "replace")
-        print(f"[3/3] GET /api/summary -> HTTP {r.status}, {summary[:200]}")
+        print(f"[3/4] GET /api/summary -> HTTP {r.status}, {summary[:200]}")
+
+        # 引擎对服务端可见才算真的能用：文件在包里、服务没认出来，一样是坏的
+        with urllib.request.urlopen(base_url + "/api/scan/meta", timeout=10) as r:
+            meta = json.loads(r.read().decode("utf-8", "replace"))
+        eng = meta.get("engine", {})
+        print(f"[4/4] GET /api/scan/meta -> 引擎 {eng.get('path') or '(空)'} "
+              f"ok={eng.get('ok')} {eng.get('version', '')}")
+        # 只在 Windows 上强制：这个 exe 在别的系统上本来就跑不起来
+        if os.name == "nt" and (ROOT / "engine").is_dir() and not eng.get("ok"):
+            return fail("包里有引擎，但服务端没认出来（路径或权限问题）")
 
     finally:
         proc.terminate()
@@ -133,7 +174,7 @@ def main() -> int:
             proc.kill()
 
     print("-" * 62)
-    print("OK  冒烟通过：解释器可用、模块可导入、服务可监听、HTTP 可响应")
+    print("OK  冒烟通过：解释器可用、模块可导入、服务可监听、HTTP 可响应、引擎可用")
     return 0
 
 

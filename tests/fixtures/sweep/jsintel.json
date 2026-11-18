@@ -1,0 +1,161 @@
+{
+  "base": "https://127.0.0.1",
+  "page_status": 200,
+  "error": "",
+  "scripts": {
+    "external": 5,
+    "inline": 4,
+    "downloaded": 5,
+    "failed": 0
+  },
+  "endpoints": [
+    "/_/service_worker",
+    "/ag/g/c",
+    "/as",
+    "/as/d",
+    "/as/d/ccm/conversion",
+    "/as/p/c",
+    "/ccm/collect",
+    "/ccm/conversion",
+    "/ccm/form-data",
+    "/ccm/geo",
+    "/ccm/s/collect",
+    "/d/ccm/form-data",
+    "/ddm/activity",
+    "/g/collect",
+    "/g/d",
+    "/g/d/ccm/conversion",
+    "/ga/g/c",
+    "/gs",
+    "/gs/ccm/conversion",
+    "/gtag/destination",
+    "/gtag/js",
+    "/mc/collect",
+    "/measurement/conversion",
+    "/measurement/enhanced",
+    "/pagead/1p-conversion",
+    "/pagead/conversion",
+    "/pagead/form-data",
+    "/pagead/set_partitioned_cookie",
+    "/pagead/uconversion",
+    "/pagead/viewthroughconversion",
+    "/rmkt/collect",
+    "/sw_iframe.html",
+    "/td",
+    "/travel/flights/click/conversion",
+    "/wp-content"
+  ],
+  "endpoints_full": [
+    "https://127.0.0.1/_/service_worker",
+    "https://127.0.0.1/ag/g/c",
+    "https://127.0.0.1/as",
+    "https://127.0.0.1/as/d",
+    "https://127.0.0.1/as/d/ccm/conversion",
+    "https://127.0.0.1/as/p/c",
+    "https://127.0.0.1/ccm/collect",
+    "https://127.0.0.1/ccm/conversion",
+    "https://127.0.0.1/ccm/form-data",
+    "https://127.0.0.1/ccm/geo",
+    "https://127.0.0.1/ccm/s/collect",
+    "https://127.0.0.1/d/ccm/form-data",
+    "https://127.0.0.1/ddm/activity",
+    "https://127.0.0.1/g/collect",
+    "https://127.0.0.1/g/d",
+    "https://127.0.0.1/g/d/ccm/conversion",
+    "https://127.0.0.1/ga/g/c",
+    "https://127.0.0.1/gs",
+    "https://127.0.0.1/gs/ccm/conversion",
+    "https://127.0.0.1/gtag/destination",
+    "https://127.0.0.1/gtag/js",
+    "https://127.0.0.1/mc/collect",
+    "https://127.0.0.1/measurement/conversion",
+    "https://127.0.0.1/measurement/enhanced",
+    "https://127.0.0.1/pagead/1p-conversion",
+    "https://127.0.0.1/pagead/conversion",
+    "https://127.0.0.1/pagead/form-data",
+    "https://127.0.0.1/pagead/set_partitioned_cookie",
+    "https://127.0.0.1/pagead/uconversion",
+    "https://127.0.0.1/pagead/viewthroughconversion",
+    "https://127.0.0.1/rmkt/collect",
+    "https://127.0.0.1/sw_iframe.html",
+    "https://127.0.0.1/td",
+    "https://127.0.0.1/travel/flights/click/conversion",
+    "https://127.0.0.1/wp-content"
+  ],
+  "sensitive": [
+    {
+      "file": "/gtag/js",
+      "line": 595,
+      "key": "sk",
+      "value": "gac_****",
+      "snippet": "Ff:\"_x_20\",Xb:\"_x_19\",Eo:\"flight_error_c"
+    },
+    {
+      "file": "/gtag/js",
+      "line": 601,
+      "key": "sk",
+      "value": "cons****",
+      "snippet": "Me:\"tc_privacy_string\"}};var L={J:{ai:\"a"
+    },
+    {
+      "file": "/gtag/js",
+      "line": 602,
+      "key": "ak",
+      "value": "enha****",
+      "snippet": "Jc:\"em_event\",ft:\"endpoint_for_debug\",Ak"
+    },
+    {
+      "file": "/gtag/js",
+      "line": 674,
+      "key": "sk",
+      "value": "(rk[****",
+      "snippet": "\"/as/p/c\"},jk);var lk={},mk=(lk[45]=gk(\""
+    },
+    {
+      "file": "/gtag/js",
+      "line": 1139,
+      "key": "ak",
+      "value": "func****",
+      "snippet": "xK.prototype.copy=func**** b=new xK((a=="
+    },
+    {
+      "file": "/gtag/js",
+      "line": 1152,
+      "key": "sk",
+      "value": "func****",
+      "snippet": "0&&(n=k.value||n);if(n){var q;b:{for(var"
+    },
+    {
+      "file": "/gtag/js",
+      "line": 1260,
+      "key": "ak",
+      "value": "k.id****",
+      "snippet": "retrievalTime:Sb()},g=fj(0,function(){re"
+    },
+    {
+      "file": "/gtag/js",
+      "line": 1374,
+      "key": "password",
+      "value": "d.pa****",
+      "snippet": "var bV={getItem:function(a){var b=null;r"
+    }
+  ],
+  "domains": {
+    "subdomains": [],
+    "thirdparty": [
+      "ad.doubleclick.net",
+      "ade.googlesyndication.com",
+      "cct.google",
+      "m.youtube.com",
+      "pagead2.googlesyndication.com",
+      "stats.g.doubleclick.net",
+      "www.facebook.com",
+      "www.google.com",
+      "www.googleadservices.com",
+      "www.googletagmanager.com",
+      "www.merchant-center-analytics.goog",
+      "www.youtube.com"
+    ],
+    "internal_ips": []
+  }
+}

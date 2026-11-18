@@ -1,0 +1,81 @@
+{
+  "alive": [
+    {
+      "path": "/.git/config",
+      "status": 200,
+      "size": 50,
+      "ctype": "application/octet-stream",
+      "final_url": "http://127.0.0.1:8899/.git/config",
+      "shrunk": null,
+      "verdict": "可访问",
+      "verified": true,
+      "recheck": [
+        {
+          "status": 200,
+          "size": 50,
+          "digest": "850b95ebbbb9dc78"
+        },
+        {
+          "status": 200,
+          "size": 50,
+          "digest": "850b95ebbbb9dc78"
+        }
+      ]
+    },
+    {
+      "path": "/.env",
+      "status": 200,
+      "size": 43,
+      "ctype": "application/octet-stream",
+      "final_url": "http://127.0.0.1:8899/.env",
+      "shrunk": null,
+      "verdict": "可访问",
+      "verified": true,
+      "recheck": [
+        {
+          "status": 200,
+          "size": 43,
+          "digest": "f1e896da8152cbb4"
+        },
+        {
+          "status": 200,
+          "size": 43,
+          "digest": "f1e896da8152cbb4"
+        }
+      ]
+    },
+    {
+      "path": "/actuator",
+      "status": 200,
+      "size": 242,
+      "ctype": "text/html; charset=utf-8",
+      "final_url": "http://127.0.0.1:8899/actuator/",
+      "shrunk": null,
+      "verdict": "可访问",
+      "verified": true,
+      "recheck": [
+        {
+          "status": 200,
+          "size": 242,
+          "digest": "0675eed862e686c8"
+        },
+        {
+          "status": 200,
+          "size": 242,
+          "digest": "0675eed862e686c8"
+        }
+      ]
+    }
+  ],
+  "base": "http://127.0.0.1:8899",
+  "baseline": {
+    "kind": "normal",
+    "status": 404,
+    "digest": "860b53ed6ea6a0cf",
+    "size": 335,
+    "ctype": "text/html;charset=utf-8",
+    "final_url": "http://127.0.0.1:8899/_aff545f1531",
+    "samples": 2
+  },
+  "notes": null
+}

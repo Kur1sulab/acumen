@@ -69,9 +69,11 @@ MAX_PARALLEL = 4
 DEFAULT_PARALLEL = 2
 DEFAULT_TIMEOUT = 900
 LOG_KEEP = 900          # 内存里保留的日志行数
-ENGINE_HINT = ("未找到 sweep 引擎。构建一次即可：\n"
-               "  cd ~/tools/sweep/engine-go && "
-               "go build -o ~/.local/bin/sweep ./cmd/sweep")
+ENGINE_HINT = ("未找到扫描引擎 sweep。\n"
+               "  · 绿色版：确认包内 engine\\sweep.exe 还在（杀软有时会吞掉它）\n"
+               "  · 源码目录：cd ~/tools/sweep/engine-go && "
+               "go build -o ~/.local/bin/sweep ./cmd/atlas\n"
+               "  · 或手动指定：python3 -m vc.server --engine /path/to/sweep")
 
 
 class ScanError(Exception):
@@ -148,17 +150,33 @@ def normalize_targets(mode: str, raw) -> list:
 
 # ---------------------------------------------------------------- 引擎发现
 
+# 包根 = vc/ 的上一级。绿色版把引擎放在这里，随包分发，不依赖机器上装过什么。
+PKG_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_EXE = ".exe" if os.name == "nt" else ""
+
+
+def _bundled_engines() -> list:
+    """包内引擎候选路径（绿色版 / 源码目录 / vendor）。"""
+    return [
+        os.path.join(PKG_ROOT, "engine", "sweep" + _EXE),
+        os.path.join(PKG_ROOT, "sweep" + _EXE),
+        os.path.join(PKG_ROOT, "vendor", "sweep" + _EXE),
+    ]
+
+
 def find_engine(explicit: str = "") -> str:
     """按优先级找 sweep 二进制；找不到返回空串。
 
     显式指定（--engine / VC_RECON_BIN）时**只认它**——指错了就明确报找不到，
     免得悄悄换成另一个二进制跑，排查时看不到真相。
+
+    其它情况先看包内再看系统 PATH：绿色版自带的引擎版本跟当前界面是一起发的，
+    优先级低于机器上那个同名旧二进制的话，会出现「界面新、引擎旧」的错配。
     """
     if explicit:
         p = os.path.abspath(os.path.expanduser(explicit))
         return p if os.path.isfile(p) and os.access(p, os.X_OK) else ""
-    cands = [
-        os.environ.get("VC_RECON_BIN", ""),
+    cands = [os.environ.get("VC_RECON_BIN", "")] + _bundled_engines() + [
         shutil.which("sweep") or "",
         "~/.local/bin/sweep",
         "~/tools/sweep/engine-go/sweep",

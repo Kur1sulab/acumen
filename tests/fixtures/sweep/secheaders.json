@@ -1,0 +1,104 @@
+{
+  "check": "secheaders",
+  "target": "127.0.0.1",
+  "url": "https://127.0.0.1",
+  "generated_at": "2026-11-18T16:14:32+08:00",
+  "conclusion": {
+    "level": "warn",
+    "text": "缺失 8 个安全头（警告 0 项），0 条 Cookie 属性不安全"
+  },
+  "risks": [
+    {
+      "level": "warn",
+      "title": "未启用 HSTS（无 Strict-Transport-Security 头）"
+    },
+    {
+      "level": "warn",
+      "title": "未设置 Content-Security-Policy（XSS 面无脚本白名单）"
+    },
+    {
+      "level": "warn",
+      "title": "未设置 X-Frame-Options（可被 iframe 嵌套，点击劫持面）"
+    },
+    {
+      "level": "warn",
+      "title": "未设置 X-Content-Type-Options（MIME 嗅探面）"
+    },
+    {
+      "level": "warn",
+      "title": "未设置 Referrer-Policy"
+    },
+    {
+      "level": "warn",
+      "title": "未设置 Permissions-Policy"
+    },
+    {
+      "level": "warn",
+      "title": "未设置 Cross-Origin-Opener-Policy"
+    },
+    {
+      "level": "warn",
+      "title": "未设置 Cross-Origin-Embedder-Policy"
+    }
+  ],
+  "data": {
+    "cookies": [],
+    "entry": "https://127.0.0.1",
+    "headers": [
+      {
+        "name": "Strict-Transport-Security",
+        "state": "missing",
+        "note": "未启用 HSTS（无 Strict-Transport-Security 头）"
+      },
+      {
+        "name": "Content-Security-Policy",
+        "state": "missing",
+        "note": "未设置 Content-Security-Policy（XSS 面无脚本白名单）"
+      },
+      {
+        "name": "X-Frame-Options",
+        "state": "missing",
+        "note": "未设置 X-Frame-Options（可被 iframe 嵌套，点击劫持面）"
+      },
+      {
+        "name": "X-Content-Type-Options",
+        "state": "missing",
+        "note": "未设置 X-Content-Type-Options（MIME 嗅探面）"
+      },
+      {
+        "name": "Referrer-Policy",
+        "state": "missing",
+        "note": "未设置 Referrer-Policy"
+      },
+      {
+        "name": "Permissions-Policy",
+        "state": "missing",
+        "note": "未设置 Permissions-Policy"
+      },
+      {
+        "name": "Cross-Origin-Opener-Policy",
+        "state": "missing",
+        "note": "未设置 Cross-Origin-Opener-Policy"
+      },
+      {
+        "name": "Cross-Origin-Embedder-Policy",
+        "state": "missing",
+        "note": "未设置 Cross-Origin-Embedder-Policy"
+      }
+    ],
+    "hops": [
+      {
+        "url": "https://127.0.0.1",
+        "status": 200,
+        "note": "终响应"
+      }
+    ],
+    "insecure_cookies": 0,
+    "missing_count": 8,
+    "summary": [
+      "安全头 ok 0 / 警告 0 / 缺失 8",
+      "Cookie 0 条（不安全 0 条）"
+    ],
+    "waf": null
+  }
+}

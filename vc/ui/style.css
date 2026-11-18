@@ -1565,6 +1565,14 @@ a { color: inherit; }
 .scanlog .warn { color: var(--med); }
 
 @media (max-width: 1180px) {
-  .scanwrap { grid-template-columns: 1fr; }
-  .scanform { max-height: 46vh; }
+  /* 窄屏彻底退出「两栏 + 各自滚动」的那套：view 与 scanwrap 都改成普通块流，
+     表单和任务列顺序往下排、整页滚动。之前保留 flex/grid 高度约束时，
+     表单会被挤成几十像素高，内容直接叠在任务卡上（实测踩过）。 */
+  #view-scan { display: block; overflow-y: auto; }
+  .scanwrap { display: block; height: auto; }
+  .scanform { max-height: none; overflow: visible; margin-bottom: 12px; }
+  .scanright { min-height: 0; }
 }
+
+/* 底部计数条是「漏洞表选中了几行」的计数，只在漏洞页有意义 */
+body:not([data-tab="findings"]) .footbar { display: none; }

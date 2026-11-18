@@ -1,6 +1,17 @@
 /* 鉴微 · 前端逻辑（无框架、无构建步骤） */
 (() => {
   const $ = (sel) => document.querySelector(sel);
+  // 表格里显示的来源名：去掉自家引擎前缀，一列能放下；完整值留在 title 里
+  const SRC_LABEL = {
+    'sweep-paths': '路径', 'sweep-portscan': '端口', 'sweep-fingerprint': '指纹',
+    'sweep-api': 'API', 'sweep-jsintel': 'JS', 'sweep-evidence': '取证',
+    'sweep-secheaders': '安全头', 'sweep-webfiles': '站点文件',
+  };
+  function srcLabel(s) {
+    const one = String(s || '').split(',')[0].trim();
+    return SRC_LABEL[one] || one || '—';
+  }
+
   const state = {
     tab: 'findings',
     sev: '',
@@ -14,6 +25,7 @@
     autoRefresh: true,
     filesOnly: false,
     logDetail: false,
+    touchedTab: false,
   };
 
   // 扫描页的状态（和列表页互不影响）
@@ -92,7 +104,7 @@
   const VIEW_META = {
     findings: ['漏洞管理', '/VULN', '查看和管理所有扫描发现的漏洞'],
     assets: ['资产管理', '/ASSET', '主机、端口与服务指纹，按风险排序'],
-    scan: ['扫描任务', '/SCAN', '起本机引擎跑任务，产物自动落进收件箱'],
+    scan: ['扫描', '/SCAN', '输入目标 → 开扫 → 命中自动入账（本机引擎，不上传）'],
     files: ['收件箱', '/INBOX', '扫描产物文件与解析状态'],
     log: ['摄入日志', '/LOG', '每轮整理的逐文件明细'],
   };
@@ -224,7 +236,7 @@
       <td class="w-check"><input type="checkbox" class="rowCheck" data-id="${r.id}" ${sel ? 'checked' : ''}></td>
       <td><select class="status-select" data-id="${r.id}" data-s="${esc(r.status)}">${statusOpts}</select></td>
       <td><span class="sev ${esc(r.sev)}">${esc(sevCn)}</span></td>
-      <td class="mono src-cell">${esc(r.sources)}</td>
+      <td class="mono src-cell" title="${esc(r.sources)}">${esc(srcLabel(r.sources))}</td>
       <td><div class="title-cell" title="${esc(r.title)}">${cveBadge}${esc(r.title)}</div>${evTitle}</td>
       <td class="asset-cell">${r.asset ? esc(r.asset) : (srcHint ? '' : '<span class="muted">—</span>')}${r.port ? `<div class="par">:${esc(r.port)}</div>` : ''}${srcHint}</td>
       <td class="w-url">${url ? `<div class="ep" title="${esc(url)}">${esc(url)}</div>` : '<span class="muted">—</span>'}${par}</td>
@@ -321,7 +333,11 @@
       .map((s) => s.split('/').filter((x) => x && x !== 'conn_keepalive' && x !== 'tcp').pop() || s).join(' · ');
     const maxChips = 5;
     const chips = ports.slice(0, maxChips).map((p) => {
-      const svc = String(p.service || p.proto || '').split('/').filter((x) => x && x !== 'conn_keepalive').pop() || '';
+      // 自家引擎给的 service 是「服务名 · banner」，先按分隔符取服务名；
+      // 老格式（xray/nmap 的 a/b/c 串）才走按 / 切最后一段的老路。
+      const svcRaw = String(p.service || '');
+      const svc = (svcRaw.includes(' · ') ? svcRaw.split(' · ')[0]
+        : svcRaw.split('/').filter((x) => x && x !== 'conn_keepalive').pop() || '') || p.proto || '';
       const tip = [a.host + ':' + p.port, p.proto, p.service, p.title].filter(Boolean).join(' · ');
       return `<span class="pchip" style="--dot:${dotFor(svc)}" title="${esc(tip)}"><i></i>${esc(p.port)}${svc && svc !== 'tcp' ? ' · ' + esc(svcShort(svc)) : ''}</span>`;
     }).join('');
@@ -353,7 +369,7 @@
       ${bar ? `<div class="mixbar">${bar}</div>` : ''}
       <div class="acard-foot">
         <span class="n">${a.n_find ? a.n_find + ' 条漏洞' : '暂无漏洞'}</span>
-        <span class="sep" aria-hidden="true">·</span><span class="mono">${esc(a.sources || '—')}</span>
+        <span class="sep" aria-hidden="true">·</span><span class="mono" title="${esc(a.sources || '')}">${esc(srcLabel(a.sources))}</span>
         <span class="grow"></span>
         <span class="mono" title="${esc(a.last_seen || '')}">${esc(ago(a.last_seen))}</span>
         <span class="go" aria-hidden="true">›</span>
@@ -853,6 +869,8 @@
       const tab = e.target.closest('.tab');
       if (tab) {
         state.tab = tab.dataset.tab;
+        state.touchedTab = true;
+        document.body.dataset.tab = state.tab;   // CSS 用它隐藏只在漏洞页有意义的全局件
         document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t === tab));
         ['findings', 'assets', 'scan', 'files', 'log'].forEach((k) => {
           $('#view-' + k).classList.toggle('hidden', k !== state.tab);
@@ -1052,6 +1070,7 @@
       const saved = localStorage.getItem(SCAN_MODE_KEY);
       if (saved) scan.mode = saved;
     } catch (e) { /* 隐私模式忽略 */ }
+    document.body.dataset.tab = state.tab;
     bind();
     loadVersion();    // 版本号（后端注入）
     loadScanMeta();   // 引擎探测放后台，不挡首屏
@@ -1061,6 +1080,16 @@
       toast('初始整理失败：' + err.message, 6000);
       await refreshAll('');
     }
+    landOnScanIfEmpty();      // 库是空的就别让人对着空表格发呆
+  }
+
+  // 第一次打开（一条漏洞都没有）直接落到扫描页。
+  // 这是漏扫，主入口应该是「填目标、开扫」，而不是先展示一个空的结果表。
+  // 只要用户自己点过任何 tab，就不再抢他的选择。
+  function landOnScanIfEmpty() {
+    if (state.touchedTab) return;
+    const n = Number(String($('#tabN-findings')?.textContent || '0').replace(/[^\d]/g, '')) || 0;
+    if (n === 0) $('#navMain')?.querySelector('.tab[data-tab="scan"]')?.click();
   }
 
   boot();

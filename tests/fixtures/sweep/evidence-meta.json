@@ -1,0 +1,25 @@
+{
+  "collected_at": "2026-11-18T16:14:19+08:00",
+  "ctype": "application/octet-stream",
+  "digest": "647a83cca85203d6",
+  "evidence": "body 含 \"status\"",
+  "live": true,
+  "name": "Actuator health",
+  "recheck": [
+    {
+      "status": 200,
+      "size": 15,
+      "digest": "647a83cca85203d6"
+    },
+    {
+      "status": 200,
+      "size": 15,
+      "digest": "647a83cca85203d6"
+    }
+  ],
+  "risk": "低",
+  "server": "SimpleHTTP/0.6 Python/3.12.16",
+  "size": 15,
+  "status": 200,
+  "url": "http://127.0.0.1:8899/actuator/health"
+}

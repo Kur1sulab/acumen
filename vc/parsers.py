@@ -33,6 +33,17 @@ from urllib.parse import urlsplit, urlunsplit, parse_qsl
 
 MAX_BYTES = 20 * 1024 * 1024  # 单文件上限 20MB，超过只记日志不解析
 
+# 解析器代次。改了解析逻辑（新增格式、修判定）就把这个数字 +1：
+# 摄入缓存以 "g<代次>:<内容哈希>" 作为指纹，代次一变全部文件自动重解析一次。
+# 不加这个的话，升级解析器之后旧产物永远停在「格式无法识别」，用户得手动 --force。
+PARSER_GEN = 5
+
+
+def gen_digest(path: str) -> str:
+    """带代次的文件指纹（缓存键）。"""
+    return f"g{PARSER_GEN}:" + file_fingerprint(path)
+
+
 # ---------------------------------------------------------------- 严重度归一
 
 SEV_RANK = {"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1}
@@ -752,6 +763,18 @@ def iter_json_objects(text: str) -> List[Any]:
 
 def parse_file(path: str) -> ParseResult:
     """解析单个文件。任何异常都收敛成 note，不向上抛。"""
+    norm = path.replace("\\", "/")
+    # 引擎把基线结果同时写在 out/<host>/ 和 out/<host>/evidence/baseline/ 两处，
+    # 两份内容一致；只解析一份，否则每条基线风险都会被记成两次命中。
+    if "/evidence/baseline/" in norm:
+        return ParseResult("skipped", [], [], note="基线产物副本（同一份已在上级目录入账）")
+    # 引擎每个模式同时写 <name>.json（机读）和 <name>.txt（人读摘要）。
+    # 有 json 在场时 txt 只是同一批事实的另一种排版，再解析一遍就是重复计数。
+    stem, ext = os.path.splitext(os.path.basename(path))
+    if stem.lower() in ("ports", "jsintel", "paths", "api_unauth", "fingerprint",
+                        "secheaders", "webfiles") and ext.lower() in (".txt", ".md"):
+        if os.path.exists(os.path.join(os.path.dirname(path), stem + ".json")):
+            return ParseResult("skipped", [], [], note="引擎文本摘要（数据已从同名 .json 入账）")
     try:
         size = os.path.getsize(path)
     except OSError as exc:
@@ -767,6 +790,16 @@ def parse_file(path: str) -> ParseResult:
         return ParseResult("error", [], [], note=f"打开失败：{exc}")
 
     fmt = sniff(path, text)
+    if text.lstrip()[:1] in "{[":
+        # 自家引擎的原生产物优先：它们是结构化事实，命中率比通用嗅探高得多
+        try:
+            from . import parsers_sweep
+            native = parsers_sweep.parse(text, path)
+        except Exception as exc:  # 引擎解析器自身出错也不能拖垮摄入
+            native = None
+            _ = exc
+        if native is not None:
+            return native
     try:
         if fmt == "nessus":
             return parse_nessus(text)

@@ -1,0 +1,62 @@
+{
+  "target": "127.0.0.1",
+  "ip": "127.0.0.1",
+  "scanned": 96,
+  "timeout": 1.5,
+  "open": [
+    {
+      "port": 22,
+      "open": true,
+      "service": "SSH",
+      "banner": "SSH-2.0-OpenSSH_10.5"
+    },
+    {
+      "port": 80,
+      "open": true,
+      "service": "HTTP",
+      "banner": "HTTP/1.1 200 OK Server: nginx/1.31.8 Date: Wed, 18 Nov 2026 08:16:45 GMT Content-Type: text/html Content-Length: 3700 Last-Modified: Thu, 29 Feb 2024 12:02:53 GMT Connection: close ETag: \"65e0726d-e74"
+    },
+    {
+      "port": 88,
+      "open": true,
+      "service": "kerberos",
+      "banner": ""
+    },
+    {
+      "port": 443,
+      "open": true,
+      "service": "HTTP",
+      "banner": "HTTP/1.1 400 Bad Request Server: nginx/1.31.8 Date: Wed, 18 Nov 2026 08:16:45 GMT Content-Type: text/html Content-Length: 255 Connection: close"
+    },
+    {
+      "port": 3306,
+      "open": true,
+      "service": "mysql",
+      "banner": "J\u0000\u0000\u0000 8.4.13\u0000\u000f\u0000\u0000\u0000JOQeA`|S\u0000��-\u0002\u0000��\u0015\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000c\u0006\u0013=;kv\u0012\b:Y\b\u0000caching_sha2_password\u0000"
+    },
+    {
+      "port": 5432,
+      "open": true,
+      "service": "postgresql",
+      "banner": ""
+    },
+    {
+      "port": 5900,
+      "open": true,
+      "service": "VNC",
+      "banner": "RFB 003.889"
+    },
+    {
+      "port": 8899,
+      "open": true,
+      "service": "HTTP",
+      "banner": "HTTP/1.0 200 OK Server: SimpleHTTP/0.6 Python/3.12.16 Date: Wed, 18 Nov 2026 08:16:45 GMT Content-type: text/html Content-Length: 31 Last-Modified: Wed, 18 Nov 2026 08:13:49 GMT"
+    },
+    {
+      "port": 18080,
+      "open": true,
+      "service": "HTTP",
+      "banner": "HTTP/1.0 200 OK Content-Type: text/html; charset=utf-8 Server: nginx X-Powered-By: PHP/7.4 Date: Wed, 18 Nov 2026 08:16:45 GMT Content-Length: 457"
+    }
+  ]
+}

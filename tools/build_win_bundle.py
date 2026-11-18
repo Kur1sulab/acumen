@@ -56,13 +56,16 @@ set "PYTHONDONTWRITEBYTECODE=1"
 
 if not exist "python\python.exe" goto :nopython
 
+rem 包内引擎：找到就显式指给后端，免得机器上另有一个旧 sweep 被优先选中
+if exist "engine\sweep.exe" set "VC_RECON_BIN=%CD%\engine\sweep.exe"
+
 echo.
 echo   鉴微 Acumen  v{ver}
 echo   ---------------------------------------------
-echo   本机看板 · 只监听 127.0.0.1 · 不联网
+echo   本地漏扫 · 自带引擎 · 只监听 127.0.0.1 · 不联网
 echo.
-echo   启动后浏览器会自动打开；关掉这个窗口即停止服务。
-echo   换端口：acumen.bat --port 7799
+echo   启动后浏览器会自动打开，在「扫描」页填目标就能开扫。
+echo   关掉这个窗口即停止服务。换端口：acumen.bat --port 7799
 echo.
 
 "python\python.exe" -m vc.server --port 7788 --open %*
@@ -92,7 +95,8 @@ pause
 README = r"""鉴微 Acumen v{ver} —— Windows 绿色版
 ================================================
 
-不需要安装任何东西。不需要 Python，不需要 pip，不需要联网。
+小而精的本地漏扫。解压即用：不需要安装 Python，不需要 pip，不需要联网，
+扫描引擎 engine\sweep.exe 已经在包里。
 
 用法
 ----
@@ -104,12 +108,17 @@ README = r"""鉴微 Acumen v{ver} —— Windows 绿色版
 3. 浏览器自动打开 http://127.0.0.1:7788/
    没自动开就手动输入这个地址
 
-4. 用完关掉黑色窗口即停止
+4. 在「扫描」页一行一个填目标（IP / 域名 / URL），选模式，点「开始扫描」
+
+5. 扫完的命中自动进「漏洞」页；要交报告就点右上角「导出 MD / CSV」
+
+6. 用完关掉黑色窗口即停止
 
 目录说明
 --------
 acumen.bat              启动器，双击这个
 START-HERE.txt          就是你正在读的这份说明
+engine\sweep.exe        扫描引擎（全流程 / 端口 / 指纹 / API / JS / 路径 / 子域 / 基线）
 python\                 内置 Python 3.12.8 运行时（约 25MB），不用管
 vc\                     程序本体
 tests\smoke_bundle.py   自检脚本，怀疑环境有问题时跑它
@@ -162,9 +171,38 @@ def eprint(*a: object) -> None:
     print(*a)
 
 
-def assemble(python_zip: Path, build_dir: Path) -> Path:
+def _check_pe(path: Path) -> str:
+    """粗检 PE 头：Windows 可执行且是 amd64。返回问题描述，没问题返回空串。
+
+    为什么查：绿色版没有引擎就只是个看结果的壳。构建脚本拿到错文件
+    （arm64 版、Linux ELF、截断下载）时如果不吭声，交付出去的症状是
+    「扫描页一直显示没找到引擎」，用户根本不知道该怪谁。
+    """
+    try:
+        head = path.read_bytes()[:0x200]
+    except OSError as exc:
+        return f"读不到 {path.name}：{exc}"
+    if len(head) < 0x40 or head[:2] != b"MZ":
+        return f"{path.name} 不是 Windows PE（缺 MZ 头）"
+    off = int.from_bytes(head[0x3C:0x40], "little")
+    if off + 6 > len(head):
+        return f"{path.name} PE 头越界"
+    if head[off:off + 4] != b"PE\0\0":
+        return f"{path.name} 缺 PE 签名"
+    machine = int.from_bytes(head[off + 4:off + 6], "little")
+    if machine != 0x8664:
+        return f"{path.name} 不是 amd64（machine=0x{machine:04x}）"
+    return ""
+
+
+def assemble(python_zip: Path, build_dir: Path, engine_exe: Path) -> Path:
     if not python_zip.is_file():
         raise SystemExit(f"[X] 找不到运行时压缩包：{python_zip}")
+    if not engine_exe.is_file():
+        raise SystemExit(f"[X] 找不到扫描引擎：{engine_exe}（漏扫不带引擎等于空壳）")
+    bad = _check_pe(engine_exe)
+    if bad:
+        raise SystemExit(f"[X] 引擎不可用：{bad}")
 
     with zipfile.ZipFile(python_zip) as z:
         names = z.namelist()
@@ -177,12 +215,12 @@ def assemble(python_zip: Path, build_dir: Path) -> Path:
         shutil.rmtree(stage)
     stage.mkdir(parents=True)
 
-    eprint(f"[1/6] 解压官方运行时 -> {stage.name}/python/")
+    eprint(f"[1/7] 解压官方运行时 -> {stage.name}/python/")
     with zipfile.ZipFile(python_zip) as z:
         z.extractall(stage / "python")
     eprint(f"      {len(list((stage / 'python').iterdir()))} 个文件")
 
-    eprint("[2/6] 修正 python312._pth（补 ..，否则 import vc 失败）")
+    eprint("[2/7] 修正 python312._pth（补 ..，否则 import vc 失败）")
     pth = stage / "python" / "python312._pth"
     if not pth.is_file():
         raise SystemExit("[X] 运行时包里没有 python312._pth，结构异常")
@@ -202,7 +240,7 @@ def assemble(python_zip: Path, build_dir: Path) -> Path:
     pth.write_bytes(body.replace("\r\n", "\n").replace("\n", "\r\n").encode("utf-8"))
     eprint(f"      路径表: {[l for l in pth.read_text().splitlines() if l.strip() and not l.startswith('#')]}")
 
-    eprint("[3/6] 拷入产品代码")
+    eprint(f"[3/7] 拷入产品代码")
     shutil.copytree(ROOT / "vc", stage / "vc",
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     (stage / "tests").mkdir(exist_ok=True)
@@ -213,14 +251,20 @@ def assemble(python_zip: Path, build_dir: Path) -> Path:
             shutil.copy2(src, stage / f)
     eprint(f"      vc/ 下 {len(list((stage / 'vc').glob('*.py')))} 个 .py")
 
-    eprint("[4/6] 生成启动器（GBK + CRLF）")
+    eprint("[4/7] 塞入扫描引擎（自带引擎才算漏扫，不然只是个看结果的壳）")
+    eng_dir = stage / "engine"
+    eng_dir.mkdir(exist_ok=True)
+    shutil.copy2(engine_exe, eng_dir / "sweep.exe")
+    eprint(f"      engine/sweep.exe  {engine_exe.stat().st_size:,} 字节")
+
+    eprint("[5/7] 生成启动器（GBK + CRLF）")
     (stage / "acumen.bat").write_bytes(
         BAT.replace("{ver}", VERSION).replace("\n", "\r\n").encode("gbk"))
     (stage / "START-HERE.txt").write_bytes(
         README.replace("{ver}", VERSION).replace("\n", "\r\n").encode("gbk"))
     eprint("      acumen.bat / START-HERE.txt")
 
-    eprint("[5/6] 打包")
+    eprint("[6/7] 打包")
     out_zip = build_dir / f"{BUNDLE}.zip"
     if out_zip.exists():
         out_zip.unlink()
@@ -232,23 +276,36 @@ def assemble(python_zip: Path, build_dir: Path) -> Path:
                 if fn.endswith(".pyc"):
                     continue
                 fp = Path(root) / fn
-                z.write(fp, fp.relative_to(stage))
+                # 压缩包内套一层同名目录：用户解压时得到一个完整的 acumen-x.y.z-win64/，
+                # 而不是把一堆文件撒进他当前的下载文件夹。
+                z.write(fp, Path(BUNDLE) / fp.relative_to(stage))
                 count += 1
 
-    eprint("[6/6] 自检（回读压缩包）")
+    eprint("[7/7] 自检（回读压缩包）")
     problems = []
     with zipfile.ZipFile(out_zip) as z:
         got = set(z.namelist())
+        def _p(rel: str) -> str:
+            return f"{BUNDLE}/{rel}"
+
         for must in ("acumen.bat", "python/python.exe", "python/python312._pth",
-                     "python/_sqlite3.pyd", "vc/server.py", "tests/smoke_bundle.py", "START-HERE.txt"):
-            if must not in got:
+                     "python/_sqlite3.pyd", "vc/server.py", "vc/parsers_sweep.py",
+                     "tests/smoke_bundle.py", "START-HERE.txt", "engine/sweep.exe"):
+            if _p(must) not in got:
                 problems.append(f"缺 {must}")
-        pth_txt = z.read("python/python312._pth").decode("utf-8")
+        if _p("engine/sweep.exe") in got:
+            eng_bytes = z.read(_p("engine/sweep.exe"))
+            if not eng_bytes.startswith(b"MZ"):
+                problems.append("engine/sweep.exe 不是 PE")
+            # 7MB 的引擎被压成小几十 KB 基本意味着拷了个空壳/占位文件
+            elif len(eng_bytes) < 4 * 1024 * 1024:
+                problems.append(f"engine/sweep.exe 只有 {len(eng_bytes):,} 字节，太小")
+        pth_txt = z.read(_p("python/python312._pth")).decode("utf-8")
         entries = [l.strip() for l in pth_txt.splitlines()
                    if l.strip() and not l.startswith("#")]
         if ".." not in entries:
             problems.append("._pth 里没有 ..（import vc 会失败）")
-        bat = z.read("acumen.bat")
+        bat = z.read(_p("acumen.bat"))
         if bat.count(b"\r\n") == 0 or bat.count(b"\n") != bat.count(b"\r\n"):
             problems.append("acumen.bat 换行不是纯 CRLF")
         try:
@@ -264,24 +321,51 @@ def assemble(python_zip: Path, build_dir: Path) -> Path:
     return out_zip
 
 
+def _default_engine() -> Path | None:
+    """找构建机上的 Windows 引擎：先看显式缓存目录，再看仓库 build/dist。
+
+    引擎是 Go 交叉编译产物，不该进 git；放 build/ 下由 .gitignore 兜住，
+    构建脚本只负责「有就用、没有就明确报错」。
+    """
+    for c in (os.environ.get("ACUMEN_ENGINE", ""),
+              ROOT / "build" / "sweep-win64.exe",
+              ROOT / "dist" / "sweep-win64.exe"):
+        if not c:
+            continue
+        p = Path(c).expanduser().resolve()
+        if p.is_file():
+            return p
+    return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="组装 Windows 绿色版（零出站）")
     ap.add_argument("--python-zip", required=True,
                     help="官方 python-3.12.x-embed-amd64.zip 的本地路径")
+    ap.add_argument("--engine", default="",
+                    help="扫描引擎 sweep.exe（交叉编译产物）；不给就探 build/sweep-win64.exe")
     ap.add_argument("--out", default="dist", help="输出目录（默认 dist）")
     args = ap.parse_args()
     _force_utf8_stdout()
 
     py_zip = Path(args.python_zip).expanduser().resolve()
+    engine = Path(args.engine).expanduser().resolve() if args.engine else _default_engine()
+    if engine is None:
+        raise SystemExit(
+            "[X] 没找到 Windows 引擎。先交叉编译一次：\n"
+            "  cd ~/tools/sweep/engine-go && "
+            "GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath "
+            "-ldflags '-s -w' -o " + str(ROOT / "build" / "sweep-win64.exe") + " ./cmd/atlas")
     out_dir = (ROOT / args.out).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     eprint(f"鉴微 Acumen v{VERSION} · Windows 绿色版构建")
     eprint(f"运行时 : {py_zip}")
+    eprint(f"引擎   : {engine}")
     eprint(f"输出   : {out_dir}")
     eprint("-" * 58)
 
-    z = assemble(py_zip, out_dir)
+    z = assemble(py_zip, out_dir, engine)
     size = z.stat().st_size
 
     eprint("-" * 58)
@@ -290,6 +374,7 @@ def main() -> int:
     eprint("")
     eprint("下一步（必须在真 Windows 上做，结构对不等于能跑）：")
     eprint(f"      解压 {z.name} 后执行 python\\python.exe tests\\smoke_bundle.py")
+    eprint("      再双击 acumen.bat，确认「扫描」页底部显示 engine\\sweep.exe 已就绪")
     return 0
 
 

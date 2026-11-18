@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -116,6 +117,28 @@ class TestEngineDiscovery(unittest.TestCase):
     def test_missing(self):
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(find_engine(os.path.join(d, "nope")), "")
+
+    def test_bundled_engine_wins_over_path(self):
+        """绿色版自带的引擎必须优先于机器上那个同名二进制。
+
+        回归背景：v1.1.0 的绿色版根本没打包引擎，扫描页在 Windows 上
+        永远是「没找到扫描引擎」；补包之后又出现另一个坑——机器上恰好装过
+        旧版 sweep 时会被先挑中，界面新引擎旧，跑出来的模块跟界面对不上。
+        """
+        import vc.scans as sc
+
+        with tempfile.TemporaryDirectory() as d:
+            eng_dir = os.path.join(d, "engine")
+            os.makedirs(eng_dir)
+            eng = make_engine(eng_dir)          # <root>/engine/sweep
+            other = make_engine(d)              # 干扰项：<root>/sweep
+
+            env = {k: v for k, v in os.environ.items() if k != "VC_RECON_BIN"}
+            with mock.patch.object(sc, "PKG_ROOT", d), \
+                    mock.patch.object(sc, "_EXE", ""), \
+                    mock.patch.dict(os.environ, env, clear=True), \
+                    mock.patch("shutil.which", return_value=other):
+                self.assertEqual(sc.find_engine(""), eng)
 
 
 class ScanCase(unittest.TestCase):
