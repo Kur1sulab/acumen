@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -67,8 +67,9 @@
         <input id="search" class="input search" type="search" placeholder="搜索 漏洞 / 端点 / 证据（按 / 聚焦）">
         <button id="btnRescan" class="btn primary" title="增量摄入：只解析新增或改动的文件">整理数据</button>
         <button id="btnForce" class="btn" title="忽略缓存，全部重新解析">全量重解析</button>
-        <a class="btn ghost" href="/api/export?fmt=csv" title="导出当前库为 CSV（Excel 可直接开）">导出 CSV</a>
-        <a class="btn ghost" href="/api/export?fmt=md" title="导出 Markdown 漏洞清单">导出 MD</a>
+        <a class="btn ghost" id="expCSV" href="/api/export?fmt=csv" title="导出当前筛选结果（Excel 可直接开，带 BOM）">导出 CSV</a>
+        <a class="btn ghost" id="expMD" href="/api/export?fmt=md" title="导出 Markdown 漏洞清单">导出 MD</a>
+        <button id="btnTheme" class="btn ghost" title="切换白色 / 暗色界面（记忆在本地）">☾ 暗色</button>
       </div>
     </header>
 

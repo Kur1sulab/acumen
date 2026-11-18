@@ -303,5 +303,31 @@ class TestRealFilesIfPresent(unittest.TestCase):
         self.assertGreater(len(r.assets), 3)
 
 
+    PACKET_DIR = os.path.expanduser("~/pentest/chy-apk/tpl/packets6")
+
+    @unittest.skipUnless(os.path.isdir(os.path.expanduser("~/pentest/chy-apk/tpl/packets6")),
+                         "本机没有 packets6 样本目录")
+    def test_real_packet_files(self):
+        """packets6 那类「请求/响应包」JSON：必须解析成带真实 Host 的条目，不能退化成空资产的合并项。"""
+        pkt_dir = self.PACKET_DIR
+        hit = 0
+        for root, _dirs, files in os.walk(pkt_dir):
+            for name in sorted(files):
+                if not name.endswith(".json"):
+                    continue
+                r = parsers.parse_file(os.path.join(root, name))
+                if r.fmt != "http_packet":
+                    continue
+                hit += 1
+                self.assertTrue(r.findings, name)
+                for f in r.findings:
+                    self.assertTrue(f["asset"], f"{name} 没解析出资产")
+                    self.assertIn(f["sev"], ("critical", "high", "medium", "low", "info"))
+                    self.assertTrue(f["endpoint"].startswith("http"), f["endpoint"])
+                if hit >= 5:
+                    return
+        self.assertGreater(hit, 0, "一个包文件都没识别出来")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -15,6 +15,8 @@
 └────────────────────────────────────────────────────────────────────┘
 ```
 
+界面默认**白色浅色版**，右上角「☾ 暗色 / ☀︎ 白色」一键切换，选择记在 localStorage。
+
 ## 跑起来
 
 ```bash
@@ -64,6 +66,7 @@ python3 -m vc.server --scan --force    # 忽略 mtime 缓存，全部重解析
 | `host_inventory` | 存活/指纹清单 JSON（host + status/server/title…） | **资产，不是漏洞** |
 | `csv_table` | 含 漏洞名/风险等级/URL 列的 CSV/TSV（中英文表头都认） | 漏洞 |
 | `md_table` | 报告里的 Markdown 表格 | 漏洞（无漏洞列的表格自动判掉） |
+| `http_packet` | 报告里的「原始请求+响应」JSON：`{title, level, req:[…], resp:[…]}` | 漏洞（从 `Host:` 取资产与端口、请求行取端点、`level` 取分级，响应体取证据） |
 
 判别是「先看形状再解析」：有 host 键 + ≥2 个探测字段 + 没有 severity/vuln 标记 → 判成资产清单，
 不会再把指纹表刷成 14 条 info 漏洞。
@@ -83,7 +86,7 @@ python3 -m vc.server --scan --force    # 忽略 mtime 缓存，全部重解析
 
 ## 导出
 
-右上角 **导出 CSV** / **导出 MD**：当前筛选条件（严重度/状态/搜索词）下的全部条目，
+右上角 **导出 CSV** / **导出 MD**：**导出的就是你当前看到的**——会带上严重度 / 状态 / 搜索词三个筛选条件，
 CSV 带 BOM（Excel 直接开不乱码），MD 按严重度分组带汇总表头。
 
 ## 数据在哪
@@ -105,7 +108,7 @@ CSV 带 BOM（Excel 直接开不乱码），MD 按严重度分组带汇总表头
 
 ```
 run.sh              启动（端口占用则复用已有实例）
-vc/parsers.py       9 类格式解析 + 资产/漏洞形状判别
+vc/parsers.py       10 类格式解析 + 资产/漏洞形状判别
 vc/store.py         SQLite：去重合并 / 筛选 / 状态 / 导出
 vc/ingest.py        收件箱遍历、mtime+指纹增量
 vc/server.py        stdlib HTTP + JSON API + watcher

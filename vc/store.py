@@ -269,8 +269,9 @@ class Store:
             "generated_at": _now(),
         }
 
-    def findings(self, sev: str = "", asset: str = "", status: str = "", q: str = "",
-                 limit: int = 200, offset: int = 0) -> Dict[str, Any]:
+    @staticmethod
+    def _filter(sev: str = "", status: str = "", q: str = "", asset: str = "") -> Tuple[str, List[Any]]:
+        """筛选子句：列表页与导出共用同一套条件，保证「导出的就是你看到的」。"""
         where: List[str] = []
         args: List[Any] = []
         if sev:
@@ -285,7 +286,11 @@ class Store:
         if q:
             where.append("(title LIKE ? OR endpoint LIKE ? OR evidence LIKE ? OR asset LIKE ?)")
             args.extend([f"%{q}%"] * 4)
-        clause = ("WHERE " + " AND ".join(where)) if where else ""
+        return (("WHERE " + " AND ".join(where)) if where else ""), args
+
+    def findings(self, sev: str = "", asset: str = "", status: str = "", q: str = "",
+                 limit: int = 200, offset: int = 0) -> Dict[str, Any]:
+        clause, args = self._filter(sev, status, q, asset)
         with self.lock:
             total = self.conn.execute(f"SELECT COUNT(*) c FROM findings {clause}", args).fetchone()["c"]
             rows = self.conn.execute(
@@ -329,19 +334,20 @@ class Store:
 
     # ------------------------------------------------------------ 导出
 
-    def export_csv(self) -> str:
+    def export_csv(self, sev: str = "", status: str = "", q: str = "") -> str:
         buf = io.StringIO()
         w = csv.writer(buf)
         w.writerow(["严重度", "漏洞名称", "资产", "IP", "端口", "端点", "参数", "命中次数", "来源", "状态", "首次发现", "最近发现", "证据"])
+        clause, args = self._filter(sev, status, q)
         with self.lock:
             rows = self.conn.execute(
-                "SELECT * FROM findings ORDER BY sev_rank DESC, count DESC, asset").fetchall()
+                f"SELECT * FROM findings {clause} ORDER BY sev_rank DESC, count DESC, asset", args).fetchall()
         for r in rows:
             w.writerow([r["sev"], r["title"], r["asset"], r["ip"], r["port"], r["endpoint"], r["param"],
                         r["count"], r["sources"], r["status"], r["first_seen"], r["last_seen"], r["evidence"]])
         return buf.getvalue()
 
-    def export_md(self) -> str:
+    def export_md(self, sev: str = "", status: str = "", q: str = "") -> str:
         s = self.summary()
         lines = [f"# 漏扫结果整理（{s['generated_at']}）", ""]
         lines.append(f"- 发现条目：**{s['findings']}**（累计命中 {s['hits']} 次）")
@@ -351,9 +357,11 @@ class Store:
         lines += ["", "## 漏洞清单", "",
                   "| 严重度 | 漏洞 | 资产 | 端点 | 命中 | 来源 | 状态 |",
                   "|---|---|---|---|---|---|---|"]
+        clause, args = self._filter(sev, status, q)
         with self.lock:
             rows = self.conn.execute(
-                "SELECT * FROM findings ORDER BY sev_rank DESC, count DESC LIMIT 500").fetchall()
+                f"SELECT * FROM findings {clause} ORDER BY sev_rank DESC, count DESC LIMIT 500",
+                args).fetchall()
         for r in rows:
             ep = (r["endpoint"] or "").replace("|", "\\|")
             lines.append(f"| {r['sev']} | {r['title']} | {r['asset']} | {ep} | {r['count']} | {r['sources']} | {r['status']} |")

@@ -16,6 +16,16 @@
     logDetail: false,
   };
 
+  // ------------------------------------------------------------ 主题（默认白色，选择记在 localStorage）
+  const THEME_KEY = 'vc-theme';
+  function applyTheme(t) {
+    const theme = t === 'dark' ? 'dark' : 'light';
+    document.documentElement.dataset.theme = theme;
+    try { localStorage.setItem(THEME_KEY, theme); } catch (e) { /* 隐私模式下忽略 */ }
+    const btn = $('#btnTheme');
+    if (btn) btn.textContent = theme === 'dark' ? '☀︎ 白色' : '☾ 暗色';
+  }
+
   const esc = (s) => String(s == null ? '' : s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -83,13 +93,16 @@
     const sel = state.selected.has(r.id) ? 'sel' : '';
     const ev = r.evidence ? `<div class="ev">${esc(r.evidence).slice(0, 220)}</div>` : '';
     const par = r.param ? `<div class="par">参数：${esc(r.param)}</div>` : '';
+    // 没有资产/端点时（比如从审计报告 Markdown 提炼的条目），把来源文件名挂出来，别让人对着空列猜
+    const fileBase = (r.files || '').split('/').pop();
+    const srcHint = (!r.asset && fileBase) ? `<div class="src-hint" title="${esc(r.files)}">↳ ${esc(fileBase)}</div>` : '';
     const statusOpts = ['待验证', '已确认', '误报', '已修复', '已忽略']
       .map((s) => `<option ${s === r.status ? 'selected' : ''}>${s}</option>`).join('');
     return `<tr class="${sel}" data-id="${r.id}">
       <td><input type="checkbox" class="rowCheck" data-id="${r.id}" ${sel ? 'checked' : ''}></td>
       <td><span class="sev ${esc(r.sev)}">${esc(r.sev)}</span></td>
       <td><div class="title-cell">${esc(r.title)}</div>${ev}</td>
-      <td class="mono">${esc(r.asset || '—')}${r.port ? `<div class="par">:${esc(r.port)}</div>` : ''}</td>
+      <td class="mono">${r.asset ? esc(r.asset) : ''}${r.port ? `<div class="par">:${esc(r.port)}</div>` : ''}${srcHint || (r.asset ? '' : '<span class="muted">—</span>')}</td>
       <td><div class="ep">${esc(r.endpoint || '—')}</div>${par}</td>
       <td class="mono nowrap" style="text-align:right">${r.count}</td>
       <td class="mono">${esc(r.sources)}</td>
@@ -306,6 +319,22 @@
       state.logDetail = !state.logDetail;
       await loadLog();
     });
+    const exportFiltered = (e) => {
+      e.preventDefault();
+      const fmt = e.currentTarget.id === 'expMD' ? 'md' : 'csv';
+      const qs = new URLSearchParams();
+      if (state.sev) qs.set('sev', state.sev);
+      if (state.status) qs.set('status', state.status);
+      if (state.q) qs.set('q', state.q);
+      const url = '/api/export?fmt=' + fmt + (qs.toString() ? '&' + qs : '');
+      window.location.href = url;
+      toast('已导出' + (qs.toString() ? '（当前筛选）' : '（全部）') + ' ' + fmt.toUpperCase());
+    };
+    $('#expCSV').addEventListener('click', exportFiltered);
+    $('#expMD').addEventListener('click', exportFiltered);
+    $('#btnTheme').addEventListener('click', () => {
+      applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
+    });
     $('#prevPage').addEventListener('click', async () => {
       state.offset = Math.max(0, state.offset - state.limit);
       await loadFindings();
@@ -338,6 +367,7 @@
   }
 
   async function boot() {
+    try { applyTheme(localStorage.getItem(THEME_KEY) || 'light'); } catch (e) { applyTheme('light'); }
     bind();
     try {
       await rescan(false); // 打开即自动整理

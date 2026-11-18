@@ -492,8 +492,96 @@ def _is_finding_row(row: Dict[str, Any]) -> bool:
     return bool(_pick(row, *_STRICT_URL_KEYS))
 
 
+_REQ_LINE = re.compile(r"^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|TRACE|CONNECT)\s+(\S+)\s+HTTP/[0-9.]", re.I)
+_HOST_LINE = re.compile(r"^host:\s*(\S+)", re.I)
+_STATUS_LINE = re.compile(r"^HTTP/[0-9.]+\s+(\d{3})", re.I)
+
+
+def _is_http_packet(it: Any) -> bool:
+    """360/人工报告常见的「请求+响应」包记录：{title, level, req:[...], resp:[...]}。"""
+    if not isinstance(it, dict):
+        return False
+    req = it.get("req") or it.get("request") or it.get("request_raw")
+    if not (isinstance(req, list) and req and isinstance(req[0], str)):
+        return False
+    return any(_REQ_LINE.match(str(x).strip()) for x in req[:3])
+
+
+def parse_http_packet(it: Dict[str, Any]) -> Dict[str, Any]:
+    """把一条原始 HTTP 包记录还原成漏洞条目：Host 头给资产、请求行给端点、level 给分级。"""
+    req = [str(x) for x in (it.get("req") or it.get("request") or [])]
+    resp = [str(x) for x in (it.get("resp") or it.get("response") or [])]
+    method, target, host, port = "", "", "", None
+    for line in req:
+        s = line.strip()
+        m = _REQ_LINE.match(s)
+        if m and not method:
+            method, target = m.group(1).upper(), m.group(2)
+            continue
+        m = _HOST_LINE.match(s)
+        if m and not host:
+            hv = m.group(1).strip()
+            if hv.count(":") == 1 and hv.rsplit(":", 1)[1].isdigit():
+                host, port = hv.rsplit(":", 1)[0], int(hv.rsplit(":", 1)[1])
+            else:
+                host = hv
+    # 请求行里可能是绝对 URL
+    if "://" in target:
+        u = urlsplit(target)
+        host = host or (u.hostname or "")
+        if u.port:
+            port = u.port
+        target = u.path + (("?" + u.query) if u.query else "")
+    scheme = "https" if port in (443, 8443) else "http"
+    endpoint = f"{scheme}://{host}{':' + str(port) if port else ''}{target}" if host else target
+    # 请求体里形如 a=1&b=2 的参数
+    params: List[str] = []
+    if req:
+        body_sep = req.index("") if "" in req else (len(req) - 1)
+        for line in req[body_sep + 1:]:
+            for k in re.findall(r"([A-Za-z_][\w\[\]\.-]*)\s*=", line):
+                if k not in params:
+                    params.append(k)
+    status = ""
+    for line in resp:
+        m = _STATUS_LINE.match(line.strip())
+        if m:
+            status = m.group(1)
+            break
+    ev_bits = []
+    if method:
+        ev_bits.append(f"{method} {target}")
+    if status:
+        ev_bits.append(f"→ {status}")
+    # 只在响应体里取证据（跳过响应头，否则抓到的是 Content-Type 这种噪声）
+    resp_tail = resp[resp.index("") + 1:] if "" in resp else resp[1:]
+    resp_body = next((x.strip() for x in resp_tail if x.strip()), "")
+    if resp_body:
+        ev_bits.append(resp_body[:160])
+    n_pk = it.get("n_packets")
+    if isinstance(n_pk, int) and n_pk > 1:
+        ev_bits.append(f"（同一问题共 {n_pk} 个包）")
+    is_ip = bool(re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", host or ""))
+    return _mk_finding(
+        title=_pick(it, *_TITLE_KEYS) or "",
+        sev=_pick(it, *_SEV_KEYS),
+        endpoint=endpoint,
+        asset=host,
+        ip=(host if is_ip else ""),
+        port=port,
+        param=", ".join(params),
+        source="packet",
+        evidence=" ".join(ev_bits),
+    )
+
+
 def parse_json_generic(obj: Any) -> ParseResult:
     items = _json_items(obj)
+    packets = [it for it in items if _is_http_packet(it)]
+    if packets and len(packets) == len(items):
+        findings = [f for f in (parse_http_packet(it) for it in packets) if f["title"]]
+        note = f"{len(findings)} 个请求/响应包" if findings else "包里没有标题字段"
+        return ParseResult("http_packet", findings, [], note=note)
     if looks_like_inventory(items):
         return parse_host_inventory(obj)
     findings: List[Dict[str, Any]] = []

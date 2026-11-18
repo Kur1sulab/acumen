@@ -128,11 +128,12 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/export":
                 fmt = (q.get("fmt") or "csv").lower()
                 stamp = time.strftime("%Y%m%d-%H%M%S")
+                sev, status, qtext = q.get("sev", ""), q.get("status", ""), q.get("q", "")
                 if fmt == "md":
-                    body = STATE.store.export_md().encode("utf-8")
+                    body = STATE.store.export_md(sev, status, qtext).encode("utf-8")
                     return self._send(200, body, "text/markdown; charset=utf-8",
                                       {"Content-Disposition": f'attachment; filename="vulns-{stamp}.md"'})
-                body = STATE.store.export_csv().encode("utf-8-sig")
+                body = STATE.store.export_csv(sev, status, qtext).encode("utf-8-sig")
                 return self._send(200, body, "text/csv; charset=utf-8",
                                   {"Content-Disposition": f'attachment; filename="vulns-{stamp}.csv"'})
             if path == "/api/health":
