@@ -1,0 +1,7 @@
+<?xml version="1.0" ?>
+<NessusClientData_v2><Report name="t"><ReportHost name="h1">
+<HostProperties><tag name="host-ip">192.0.2.44</tag><tag name="host-fqdn">h1.example.test</tag></HostProperties>
+<ReportItem port="443" svc_name="www" protocol="tcp" severity="3" pluginID="15588" pluginName="Log4j Detection">
+<cve>CVE-2021-44228</cve><cve>CVE-2021-45046</cve>
+<description>Log4Shell 命中</description></ReportItem>
+</ReportHost></Report></NessusClientData_v2>

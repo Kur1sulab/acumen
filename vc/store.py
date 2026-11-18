@@ -60,6 +60,16 @@ class Store:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self._init_schema()
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """老库补列，幂等。"""
+        with self.lock:
+            cols = {r[1] for r in self.conn.execute("PRAGMA table_info(findings)")}
+            if "cve" not in cols:
+                self.conn.execute("ALTER TABLE findings ADD COLUMN cve TEXT DEFAULT ''")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_f_cve ON findings(cve)")
+            self.conn.commit()
 
     # ------------------------------------------------------------ schema
 
@@ -72,7 +82,7 @@ class Store:
                     key TEXT UNIQUE NOT NULL,
                     asset TEXT, ip TEXT, port INTEGER,
                     endpoint TEXT, param TEXT,
-                    title TEXT, sev TEXT, sev_rank INTEGER,
+                    title TEXT, cve TEXT DEFAULT '', sev TEXT, sev_rank INTEGER,
                     sources TEXT, evidence TEXT,
                     count INTEGER DEFAULT 1,
                     status TEXT DEFAULT '待验证',
@@ -161,12 +171,12 @@ class Store:
                 ts = f.get("last_seen") or _now()
                 if row is None:
                     self.conn.execute(
-                        """INSERT INTO findings(key,asset,ip,port,endpoint,param,title,sev,sev_rank,
+                        """INSERT INTO findings(key,asset,ip,port,endpoint,param,title,cve,sev,sev_rank,
                                                 sources,evidence,count,status,first_seen,last_seen,files)
-                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (key, f.get("asset", ""), f.get("ip", ""), f.get("port"),
                          f.get("endpoint", ""), f.get("param", ""), f.get("title", ""),
-                         sev, sev_rank(sev), f.get("source", ""), f.get("evidence", ""),
+                         f.get("cve", ""), sev, sev_rank(sev), f.get("source", ""), f.get("evidence", ""),
                          int(f.get("count") or 1), "待验证",
                          f.get("first_seen") or ts, ts, src_file[-300:]),
                     )
@@ -178,13 +188,15 @@ class Store:
                     self.conn.execute(
                         """UPDATE findings SET count=?, sev=?, sev_rank=?, sources=?, evidence=?,
                                first_seen=?, last_seen=?, files=?, ip=COALESCE(NULLIF(ip,''),?), 
-                               port=COALESCE(port,?)
+                               port=COALESCE(port,?),
+                               cve=?
                            WHERE key=?""",
                         (row["count"] + int(f.get("count") or 1), best_sev, sev_rank(best_sev),
                          _merge_uniq(row["sources"], [f.get("source", "")]),
                          (row["evidence"] or f.get("evidence") or "")[:600],
                          first, last, _merge_uniq(row["files"], [src_file[-300:]]),
-                         f.get("ip", ""), f.get("port"), key),
+                         f.get("ip", ""), f.get("port"),
+                         _merge_uniq(row["cve"], [f.get("cve", "")], cap=8), key),
                     )
                     merged += 1
             self.conn.commit()

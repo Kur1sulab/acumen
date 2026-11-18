@@ -1,0 +1,3 @@
+{"template-id": "CVE-2021-44228", "info": {"name": "Apache Log4j2 Remote Code Execution", "severity": "critical", "tags": ["cve", "rce", "log4j"]}, "host": "https://demo.cve-lab.test", "matched-at": "https://demo.cve-lab.test/api/login", "type": "http", "matcher-name": "log4j-jndi"}
+{"template-id": "CVE-2019-0708", "info": {"name": "BlueKeep RDP Pre-Auth RCE (cve_2019_0708 别名测试)", "severity": "critical"}, "host": "10.0.0.5", "ip": "10.0.0.5", "matched-at": "rdp://10.0.0.5:3389", "type": "network"}
+{"template-id": "exposed-panel", "info": {"name": "Admin panel exposed (no vuln id)", "severity": "medium"}, "host": "https://demo.cve-lab.test", "matched-at": "https://demo.cve-lab.test/admin"}

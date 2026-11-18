@@ -200,14 +200,22 @@
       .map((x) => `<option ${x === r.status ? 'selected' : ''}>${x}</option>`).join('');
 
     const sevCn = SEV_CN[r.sev] || r.sev || '—';
+    // CVE 徽章：一条命中可能带多个编号，最多露 2 个，其余折进 title
+    const cveList = String(r.cve || '').split(',').filter(Boolean);
+    const cveBadge = cveList.length
+      ? `<span class="cve" title="${esc(cveList.join(' / '))}">${esc(cveList.slice(0, 2).join(' '))}${cveList.length > 2 ? ` +${cveList.length - 2}` : ''}</span> `
+      : '';
 
     // URL 列：有资产就拼成 http(s)://host:port/端点（跟天穹那个 URL 列一个意思），没资产就退回端点原文
+    const epRaw = String(r.endpoint || '');
     let url = '';
-    if (r.asset) {
-      const ep = String(r.endpoint || '');
-      url = /^https?:\/\//i.test(ep)
-        ? ep
-        : 'https://' + r.asset + (r.port ? ':' + r.port : '') + (ep ? '/' + ep.replace(/^\/+/, '') : '');
+    if (/^[a-z][a-z0-9+.\-]*:\/\//i.test(epRaw)) {
+      // 端点自带协议（rdp:// ftp:// …）就照原样用，别硬套 https
+      url = epRaw;
+    } else if (r.asset) {
+      // asset 可能已经是 host:port，再拼一次 port 就成 1.2.3.4:3389:3389 了
+      const hostPart = /:\d+$/.test(r.asset) ? r.asset : r.asset + (r.port ? ':' + r.port : '');
+      url = 'https://' + hostPart + (epRaw ? '/' + epRaw.replace(/^\/+/, '') : '');
     } else {
       url = String(r.endpoint || '');
     }
@@ -217,7 +225,7 @@
       <td><select class="status-select" data-id="${r.id}" data-s="${esc(r.status)}">${statusOpts}</select></td>
       <td><span class="sev ${esc(r.sev)}">${esc(sevCn)}</span></td>
       <td class="mono src-cell">${esc(r.sources)}</td>
-      <td><div class="title-cell" title="${esc(r.title)}">${esc(r.title)}</div>${evTitle}</td>
+      <td><div class="title-cell" title="${esc(r.title)}">${cveBadge}${esc(r.title)}</div>${evTitle}</td>
       <td class="asset-cell">${r.asset ? esc(r.asset) : (srcHint ? '' : '<span class="muted">—</span>')}${r.port ? `<div class="par">:${esc(r.port)}</div>` : ''}${srcHint}</td>
       <td class="w-url">${url ? `<div class="ep" title="${esc(url)}">${esc(url)}</div>` : '<span class="muted">—</span>'}${par}</td>
       <td class="mono nowrap" style="text-align:right">${r.count}</td>

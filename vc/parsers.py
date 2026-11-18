@@ -12,7 +12,7 @@
   md_table       Markdown 表格（报告里的漏洞清单）
 
 统一记录：
-  finding: {asset, ip, port, endpoint, param, title, sev, source, evidence,
+  finding: {asset, ip, port, endpoint, param, title, cve, sev, source, evidence,
             first_seen, last_seen, count}
   asset:   {host, ip, port, proto, service, title, fingerprint, source}
 
@@ -51,6 +51,10 @@ _SEV_ALIAS = {
     "中危": "medium", "中": "medium", "中风险": "medium",
     "低危": "low", "低": "low", "低风险": "low",
     "信息": "info", "提示": "info", "无": "info",
+    # 繁体（港台报告）
+    "嚴重": "critical", "極危": "critical", "高危": "high", "高風險": "high",
+    "中危": "medium", "中風險": "medium", "低危": "low", "低風險": "low",
+    "資訊": "info", "訊息": "info", "提示訊息": "info",
     # nessus 数字
     "4": "critical", "3": "high", "2": "medium", "1": "low", "0": "info",
 }
@@ -143,6 +147,26 @@ def _param_of(url: str) -> str:
     return ",".join(sorted({k for k, _ in parse_qsl(q, keep_blank_values=True)}))[:200]
 
 
+# ---------------------------------------------------------------- CVE 识别
+
+# 分隔符要兼收：半角横线/下划线/空白 + 全角－(U+FF0D) + 短破折–、长破折—、减号−
+_CVE_SEP = r"[-_\s\uFF0D\u2013\u2014\u2212]{0,2}"
+_CVE_RE = re.compile(r"\bCVE" + _CVE_SEP + r"(\d{4})" + _CVE_SEP + r"(\d{4,7})\b", re.I)
+
+
+def cve_of(*texts: Any) -> str:
+    """从任意文本里抽 CVE 编号，兼容 CVE-2021-44228 / cve_2021_44228 / CVE 2021 44228。"""
+    seen: List[str] = []
+    for t in texts:
+        if t is None:
+            continue
+        for m in _CVE_RE.finditer(str(t)):
+            cid = "CVE-%s-%s" % (m.group(1), m.group(2))
+            if cid not in seen:
+                seen.append(cid)
+    return ",".join(sorted(seen))
+
+
 def _trim(text: Any, limit: int = 600) -> str:
     s = "" if text is None else str(text)
     s = re.sub(r"\s+", " ", s).strip()
@@ -164,15 +188,20 @@ def _pick(d: Dict[str, Any], *names: str) -> Any:
 def _mk_finding(**kw) -> Dict[str, Any]:
     f = {
         "asset": "", "ip": "", "port": None, "endpoint": "", "param": "",
-        "title": "", "sev": "info", "source": "", "evidence": "",
+        "title": "", "cve": "", "sev": "info", "source": "", "evidence": "",
         "first_seen": "", "last_seen": "", "count": 1,
     }
     f.update({k: v for k, v in kw.items() if v is not None})
     f["sev"] = norm_sev(f.get("sev"))
     f["title"] = _trim(f.get("title"), 200)
     f["asset"] = _trim(f.get("asset") or _asset_of(f.get("endpoint", "")), 200)
+    if f.get("port") in (None, ""):
+        f["port"] = _port_of(f.get("endpoint", ""))
     f["endpoint"] = _trim(f.get("endpoint"), 600)
     f["evidence"] = _trim(f.get("evidence"), 600)
+    # CVE：显式值也要过一遍提取（template-id 可能是 CVE-xxx 也可能是 exposed-panel，只留真编号）
+    # 显式值抽得出就用它，抽不出再退回标题 / 证据 / 原始文本
+    f["cve"] = _trim(cve_of(f.get("cve")) or cve_of(f["title"], f["evidence"], kw.get("raw")), 200)
     if f["param"] in ("", None) and f["endpoint"]:
         f["param"] = _param_of(f["endpoint"])
     return f
@@ -226,6 +255,8 @@ def parse_nuclei_jsonl(text: str) -> ParseResult:
             ip=obj.get("ip") or "",
             port=obj.get("port") or _port_of(url),
             source="nuclei",
+            # nuclei 的 CVE 编号绝大多数写在模板 ID 里（CVE-2021-44228.yaml → template-id 同名）
+            cve=obj.get("template-id") or obj.get("templateID") or obj.get("id") or "",
             evidence=obj.get("matcher-name") or "; ".join(map(str, obj.get("extracted-results") or [])),
             first_seen=obj.get("timestamp") or "",
             last_seen=obj.get("timestamp") or "",
@@ -372,6 +403,7 @@ def parse_nessus(text: str) -> ParseResult:
                 title=f"{title} (plugin {item.get('pluginID','')})".strip(),
                 sev=sev, asset=host or ip, ip=ip, port=pnum,
                 endpoint=f"{host or ip}:{pnum}", source="nessus", evidence=desc,
+                cve=",".join(t.text.strip() for t in item.findall("cve") if t.text and t.text.strip()),
             ))
             assets.append(_mk_asset(host=host or ip, ip=ip, port=pnum, service=item.get("svc_name") or "",
                                     fingerprint=f"nessus:{item.get('pluginFamily','')}", source="nessus"))
@@ -413,8 +445,11 @@ def parse_yakit_port(text: str) -> ParseResult:
 
 _TITLE_KEYS = ("title", "vulnname", "vuln_name", "vulntitle", "vuln", "vulnerability", "name",
                "漏洞名称", "漏洞标题", "漏洞", "漏洞类型", "风险名称", "风险项", "检测项",
-               "问题名称", "pluginname", "templateid", "template-id", "issue")
-_SEV_KEYS = ("severity", "risk", "risklevel", "level", "危险等级", "风险等级", "严重程度", "等级", "cvss")
+               "问题名称", "pluginname", "templateid", "template-id", "issue",
+               # 繁体（港台报告）/ 其他常见叫法
+               "發現", "发现", "漏洞名稱", "問題", "風險描述", "風險名稱", "標題", "检查项", "缺陷")
+_SEV_KEYS = ("severity", "risk", "risklevel", "level", "危险等级", "风险等级", "严重程度", "等级", "cvss",
+             "嚴重度", "嚴重程度", "風險等級", "危險等級", "分級", "風險")
 # 宽松：只用来取值
 _URL_KEYS = ("url", "target", "host", "asset", "endpoint", "ip", "地址", "url地址", "目标url", "目标地址",
              "affectedurl", "affected", "matched-at")
@@ -425,6 +460,7 @@ _HOST_KEYS = {"host", "hostname", "ip", "url", "地址", "主机", "ip地址"}
 # 资产清单特征字段（端口探测/指纹/存活探测的产物大多是这种形状）
 _INV_MARKERS = {"status", "statuscode", "server", "powered", "title", "ct", "len", "fw", "header", "code"}
 _VULN_MARKERS = {"vuln", "vulnname", "vulnerability", "cve", "cwe", "template-id", "templateid", "payload"}
+_CVE_KEYS = ("cve", "cveid", "cve_id", "cves", "cve编号", "漏洞编号", "vulnid", "vuln_id", "cvelist")
 _PARAM_KEYS = ("param", "parameter", "参数", "参数名")
 _EVID_KEYS = ("evidence", "detail", "description", "output", "payload", "proof", "描述", "证据", "详情")
 
@@ -609,6 +645,7 @@ def _rows_to_findings(rows: List[Dict[str, str]], source: str) -> List[Dict[str,
             title=title, sev=_pick(row, *_SEV_KEYS), endpoint=str(url),
             param=str(_pick(row, *_PARAM_KEYS) or ""), source=source,
             evidence=_pick(row, *_EVID_KEYS) or "",
+            cve=str(_pick(row, *_CVE_KEYS) or ""),
         ))
     return out
 
