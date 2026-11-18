@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>漏扫控制台 · Vuln Console</title>
+<link rel="stylesheet" href="/ui/style.css">
+</head>
+<body>
+<div class="app">
+  <!-- 左栏：筛选 + 收件箱 -->
+  <aside class="rail glass">
+    <div class="brand">
+      <span class="dot"></span>
+      <div>
+        <h1>漏扫控制台</h1>
+        <p class="sub">Vuln Console · local</p>
+      </div>
+    </div>
+
+    <section class="rail-block">
+      <div class="rail-title">严重度</div>
+      <div id="sevChips" class="chips"></div>
+    </section>
+
+    <section class="rail-block">
+      <div class="rail-title">状态</div>
+      <select id="statusFilter" class="input">
+        <option value="">全部状态</option>
+        <option>待验证</option>
+        <option>已确认</option>
+        <option>误报</option>
+        <option>已修复</option>
+        <option>已忽略</option>
+      </select>
+    </section>
+
+    <section class="rail-block">
+      <div class="rail-title">资产 TOP</div>
+      <ul id="topAssets" class="mini-list"><li class="muted">加载中…</li></ul>
+    </section>
+
+    <section class="rail-block">
+      <div class="rail-title">漏洞类型 TOP</div>
+      <ul id="topTypes" class="mini-list"><li class="muted">加载中…</li></ul>
+    </section>
+
+    <section class="rail-block grow">
+      <div class="rail-title">收件箱</div>
+      <ul id="inboxList" class="mini-list mono"></ul>
+    </section>
+
+    <footer class="rail-foot">
+      <span id="lastScan" class="muted">—</span>
+      <label class="switch" title="每 4 秒自动刷新（有变化才重绘）">
+        <input type="checkbox" id="autoRefresh" checked>
+        <span>自动刷新</span>
+      </label>
+    </footer>
+  </aside>
+
+  <!-- 主区 -->
+  <main class="main">
+    <header class="topbar glass">
+      <div class="stats" id="stats"></div>
+      <div class="actions">
+        <input id="search" class="input search" type="search" placeholder="搜索 漏洞 / 端点 / 证据（按 / 聚焦）">
+        <button id="btnRescan" class="btn primary" title="增量摄入：只解析新增或改动的文件">整理数据</button>
+        <button id="btnForce" class="btn" title="忽略缓存，全部重新解析">全量重解析</button>
+        <a class="btn ghost" href="/api/export?fmt=csv" title="导出当前库为 CSV（Excel 可直接开）">导出 CSV</a>
+        <a class="btn ghost" href="/api/export?fmt=md" title="导出 Markdown 漏洞清单">导出 MD</a>
+      </div>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="findings">漏洞 <span id="tabN-findings" class="badge">0</span></button>
+      <button class="tab" data-tab="assets">资产 <span id="tabN-assets" class="badge">0</span></button>
+      <button class="tab" data-tab="files">收件箱状态 <span id="tabN-files" class="badge">0</span></button>
+      <button class="tab" data-tab="log">摄入日志</button>
+      <div class="tabs-right">
+        <select id="bulkStatus" class="input" title="对勾选的行批量改状态">
+          <option value="">批量状态…</option>
+          <option>待验证</option>
+          <option>已确认</option>
+          <option>误报</option>
+          <option>已修复</option>
+          <option>已忽略</option>
+        </select>
+        <span id="selInfo" class="muted">未选中</span>
+      </div>
+    </nav>
+
+    <section class="panel glass">
+      <!-- 漏洞表 -->
+      <div class="view" id="view-findings">
+        <table class="table">
+          <thead>
+            <tr>
+              <th class="w-check"><input type="checkbox" id="checkAll"></th>
+              <th class="w-sev">严重度</th>
+              <th>漏洞</th>
+              <th>资产</th>
+              <th>端点 / 参数</th>
+              <th class="w-num">命中</th>
+              <th class="w-src">来源</th>
+              <th class="w-status">状态</th>
+              <th class="w-time">发现</th>
+            </tr>
+          </thead>
+          <tbody id="findingsBody"><tr><td colspan="9" class="muted center">加载中…</td></tr></tbody>
+        </table>
+        <div class="pager">
+          <button class="btn ghost" id="prevPage">上一页</button>
+          <span id="pageInfo" class="muted">—</span>
+          <button class="btn ghost" id="nextPage">下一页</button>
+        </div>
+      </div>
+
+      <!-- 资产表 -->
+      <div class="view hidden" id="view-assets">
+        <table class="table">
+          <thead>
+            <tr><th>主机</th><th class="w-ip">IP</th><th>开放端口 / 指纹</th><th>标题</th><th class="w-src">来源</th><th class="w-time">最近</th></tr>
+          </thead>
+          <tbody id="assetsBody"><tr><td colspan="6" class="muted center">加载中…</td></tr></tbody>
+        </table>
+      </div>
+
+      <!-- 收件箱状态 -->
+      <div class="view hidden" id="view-files">
+        <div class="subbar">
+          <span class="muted" id="filesCount">—</span>
+          <button class="btn ghost small" id="filesOnly">只看有产出</button>
+        </div>
+        <table class="table">
+          <thead>
+            <tr><th>文件</th><th class="w-src">格式</th><th class="w-num">漏洞</th><th class="w-num">资产</th><th>备注</th><th class="w-time">扫描时间</th></tr>
+          </thead>
+          <tbody id="filesBody"><tr><td colspan="6" class="muted center">加载中…</td></tr></tbody>
+        </table>
+      </div>
+
+      <!-- 日志 -->
+      <div class="view hidden" id="view-log">
+        <div class="subbar">
+          <span class="muted" id="logCount">—</span>
+          <button class="btn ghost small" id="logDetail">含逐文件明细</button>
+        </div>
+        <pre id="logBody" class="log">加载中…</pre>
+      </div>
+    </section>
+  </main>
+</div>
+<div id="toast" class="toast"></div>
+<script src="/ui/app.js"></script>
+</body>
+</html>
