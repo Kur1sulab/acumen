@@ -31,6 +31,7 @@ kara list --sev high                     # 看命中（--q 关键词 / --status 
 kara show 12                             # 单条详情：判据、证据、复现命令
 kara assets                              # 资产：主机 / 端口 / 指纹
 kara verify --ids 12,15                  # 复验：同一模式同一入口重跑
+kara strike --sev high --limit 10        # 移交执行层 litmus2 真打一轮，结论回写本库
 kara export --format md -o report.md     # 导出 CSV / MD
 kara summary                             # 库总览
 kara engine                              # 引擎与八种模式自检
@@ -45,6 +46,23 @@ kara engine                              # 引擎与八种模式自检
 **Windows**：下 Releases 里的 `kara-*-win64.zip`，解压双击 `kara.bat`，不需要装 Python 也不需要 Go。
 
 引擎按 `engine/sweep` → `PATH` 上的 `sweep` → `~/.local/bin/sweep` 顺序找；`--engine /path/to/sweep` 指定后只认它，指错会明确报错。
+
+### 发现 → 验证 的两层（`strike`）
+
+Kara 的引擎**只读**：只观测、只取证，不发一个写请求——它给的是「可疑面」。
+「这是不是真漏洞、能不能打进去」交给执行层 [litmus2](https://github.com/Kur1sulab/litmus2)
+（内网授权验证框架，自带 injection / authz / authprobe / exposure 与 replay 复现）。
+
+```bash
+kara strike --sev high --limit 10        # 挑命中 → 生成清单 → 跑 litmus → 回写本库
+kara strike --ids 5,9,10
+kara strike --sev critical --dry-run     # 只出 targets.txt 与线索雏形，不发请求
+```
+
+移交时线索一律标 `level=L1 / confidence=suspected`，执行层给的 `[L2/confirmed]` 写进证据串——
+**没落地的条目在报告里一眼看得出来**。产物落在 `~/.kara/strike/<时间戳>/`（targets、雏形、litmus 报告与证据）。
+
+> `strike` 是真发请求做验证，目标必须在你授权范围内。Kara 本身永远只读，这层边界不合并。
 
 ### 引擎（Go，仓库内自带）
 
@@ -70,7 +88,8 @@ GOOS=windows GOARCH=amd64 go build -ldflags "-s -w" -o ../build/sweep-win64.exe 
 run.sh               网页版启动（端口占用则复用已有实例）
 kara                 终端版入口（等价 python3 -m vc.cli）
 engine-go/           扫描内核源码（Go，构建产物 → engine/sweep）
-vc/cli.py            终端模式：scan / list / show / verify / export …
+vc/cli.py            终端模式：scan / list / show / verify / strike / export …
+vc/strike.py         移交：命中 → litmus2 目标清单与线索雏形 → 结论回写
 vc/parsers.py        第三方格式解析 + 资产/漏洞形状判别
 vc/parsers_sweep.py  引擎原生产物解析（7 种形状）+ 分级与误报过滤
 vc/store.py          SQLite：去重合并 / 筛选 / 状态 / 复验结论 / 导出

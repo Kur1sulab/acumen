@@ -3,6 +3,40 @@
 版本号按 [语义化版本](https://semver.org/lang/zh-CN/)：修 bug 走 patch，加能力走 minor，
 输出格式或数据库结构不兼容才走 major。
 
+## 1.6.0 — 2026-11-18
+
+### 新增 · `kara strike`：发现 → 验证 的移交
+
+Kara 的引擎只读，只给「可疑面」；是不是真漏洞、能不能打进去，由执行层 litmus2 判定。
+这一版把两段接上：挑命中 → 生成目标清单与线索雏形 → 跑 litmus → 结论归一化回写同一个库。
+
+```bash
+kara strike --sev high --limit 10        # 挑 high 前 10 条，交给 litmus 真打一轮
+kara strike --ids 5,9,10                 # 指定条目
+kara strike --sev critical --dry-run     # 只出清单与雏形，不发一个请求
+kara strike --ports 8080 --litmus-arg -no-auth-probe
+```
+
+- 目标推导：端点裁到 `scheme://host:port`（把 `/actuator/env` 这种具体路径丢给执行层，
+  等于替它预设了结论）；没有端点就退回 `资产:端口`。
+- 线索雏形固定 `level=L1 / confidence=suspected`——Kara 不替执行层下结论。
+- 执行层的结论带 `[L2/confirmed]` 这类级别/置信写进证据串，L1 的条目交付时一眼看得出还没落地。
+- 公网目标自动加 `-allow-public`（litmus 是内网框架，默认只放行私网/回环）。
+- 产物：`~/.kara/strike/<时间戳>/{targets.txt, seed-findings.json, litmus/}`，报告与证据都在里面。
+
+实测（本地靶站）：Kara 只读扫出 6 条 high → litmus 验证出 9 条，
+其中 3 条升级到 critical/L2（.env、heapdump、备份包拿到了真实内容），全部回写本库。
+
+### 边界（写进代码注释，也是产品线纪律）
+
+- Kara 不做写操作、不做爆破、不发 payload；要「打」必须显式 `strike` 移交。
+- `strike` 不复制执行层的检查逻辑，只做清单生成与结果归一化——两边各守一段，报告才可审计。
+
+### 测试
+
+- 133 个单测（新增 `tests/test_strike.py` 17 个：目标推导、L1 雏形、结论回写、
+  级别保留、`--dry-run` 不发请求、执行层缺失时干净报错）。
+
 ## 1.5.0 — 2026-11-18
 
 ### 新增 · 终端模式

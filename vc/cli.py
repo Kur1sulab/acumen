@@ -19,6 +19,7 @@ Web 控制台能做的事这里都能做：扫 → 入账 → 看 → 复验 →
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import socket
 import ssl
@@ -410,6 +411,89 @@ def cmd_verify(ctx: Ctx, args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- strike（移交给 litmus2）
+
+def cmd_strike(ctx: Ctx, args: argparse.Namespace) -> int:
+    """挑命中 → 生成目标清单 → 交 litmus2 真打一轮 → 结论回写本库。
+
+    边界：Kara 的引擎只读，只给「可疑面」；是不是真漏洞、能不能打进去由执行层判定。
+    这里不复制执行层的检查逻辑，只做移交与结果归一化。
+    """
+    from . import strike as st
+
+    if args.ids:
+        ids = [int(x) for x in args.ids.replace(",", " ").split() if x.strip().isdigit()]
+        rows = [dict(r) for r in ctx.store.findings_by_ids(ids)]
+    else:
+        rows = ctx.store.findings(sev=args.sev, status=args.status, q=args.q, limit=args.limit)["rows"]
+        rows = [dict(r) for r in rows]
+    rows = [r for r in rows if st.target_of(r)]
+    if not rows:
+        print("没有可移交的命中（要么库里没条目，要么这些条目没有可回访的目标）。")
+        return 0
+
+    targets = st.collect(rows)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    work = os.path.abspath(os.path.expanduser(os.path.join("~/.kara/strike", stamp)))
+    os.makedirs(work, exist_ok=True)
+    seed_path = os.path.join(work, "seed-findings.json")
+    tgt_path = os.path.join(work, "targets.txt")
+    seeds = st.build_seed(rows)
+    with open(seed_path, "w", encoding="utf-8") as fh:
+        json.dump({"findings": seeds}, fh, ensure_ascii=False, indent=2)
+    with open(tgt_path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(targets) + "\n")
+
+    print(f"{_c('空境 · Kara', '1')} v{__version__}　移交给执行层")
+    print(f"  命中　{len(rows)} 条 → 目标 {len(targets)} 个")
+    print(f"  工作目录 {work}")
+    print(f"  目标清单 {tgt_path}")
+    print(f"  线索雏形 {seed_path}")
+    print()
+    print(_table(["#", "目标", "来自命中"],
+                 [[i + 1, _cut(t, 60), sum(1 for r in rows if st.target_of(r) == t)] for i, t in enumerate(targets)],
+                 [3, 60, 9]))
+
+    if args.dry_run:
+        print("\n--dry-run：清单已生成，没有发起任何请求。要去打就跑同一条命令去掉 --dry-run。")
+        return 0
+
+    lit = st.find_litmus(args.litmus_bin)
+    if not lit:
+        print()
+        print(_c(st.HINT, "33"), file=sys.stderr)
+        return 2
+
+    print()
+    print(f"{_c('[strike]', '36')} 执行层 {lit}")
+    print(f"{_c('[strike]', '36')} 这是真的发请求做验证（不再是只读观测），目标必须在你授权范围内")
+    rc, out_dir = st.run_litmus(lit, targets, os.path.join(work, "litmus"),
+                                timeout=args.timeout, ports=args.ports,
+                                extra=args.litmus_arg, log=print)
+    print(f"{_c('[strike]', '36')} litmus 退出码 {rc}　产物 {out_dir}")
+
+    items = st.read_litmus_findings(out_dir)
+    if not items:
+        print(f"{_c('[strike]', '36')} 执行层没有产出 findings.json（本轮可能全 skip/na，看上面的日志）")
+        return 0 if rc == 0 else 1
+
+    mix = st.summarize(items)
+    kara_rows = st.to_kara(items, os.path.join(out_dir, "findings.json"))
+    added, merged = ctx.store.add_findings(kara_rows, os.path.join(out_dir, "findings.json"))
+    print(f"{_c('[strike]', '36')} 执行层结论 {len(items)} 条　"
+          + "　".join(f"{k} {mix[k]}" for k in ("critical", "high", "medium", "low", "info") if mix.get(k)))
+    print(f"{_c('[strike]', '36')} 回写本库：新增 {added} · 合并进既有条目 {merged}")
+
+    new_rows = [r for r in ctx.store.findings(limit=200)["rows"] if (r.get("sources") or "").find("litmus2") >= 0]
+    if new_rows:
+        print()
+        print(_table(["ID", "严重度", "标题", "资产", "级别/置信"],
+                     [[r["id"], _sev(r["sev"]), _cut(r["title"], 38), _cut(r["asset"], 24),
+                       _cut((r.get("evidence") or "").split("·")[-1].strip(), 14)] for r in new_rows[:15]],
+                     [5, 8, 38, 24, 14]))
+    return 0
+
+
 # ---------------------------------------------------------------- summary / engine
 
 def cmd_summary(ctx: Ctx, args: argparse.Namespace) -> int:
@@ -502,6 +586,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--status", default="")
     p.add_argument("--limit", type=int, default=50)
     p.set_defaults(func=cmd_verify)
+
+    p = sub.add_parser("strike", help="把命中移交 litmus2 真打一轮，结论回写本库")
+    p.add_argument("--ids", default="", help="如 5,9,10；不给就按 --sev/--status 挑")
+    p.add_argument("--sev", default="", choices=["", "critical", "high", "medium", "low", "info"])
+    p.add_argument("--status", default="", help="待验证 / 已确认 / 误报 …")
+    p.add_argument("--q", default="", help="关键词")
+    p.add_argument("--limit", type=int, default=20, help="最多挑多少条（默认 20）")
+    p.add_argument("--dry-run", action="store_true", help="只生成目标清单与线索雏形，不发请求")
+    p.add_argument("--litmus-bin", default="", help="litmus 可执行文件路径（默认自动找）")
+    p.add_argument("--ports", default="", help="转给 litmus 的 -p：top100/top1000/full/80,443")
+    p.add_argument("--litmus-arg", action="append", default=[], help="额外透传给 litmus 的参数，可重复")
+    p.set_defaults(func=cmd_strike)
 
     p = sub.add_parser("summary", help="库总览")
     p.set_defaults(func=cmd_summary)
