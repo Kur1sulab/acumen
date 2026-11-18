@@ -57,6 +57,7 @@ Kara 的引擎**只读**：只观测、只取证，不发一个写请求——�
 kara strike --sev high --limit 10        # 挑命中 → 生成清单 → 跑 litmus → 回写本库
 kara strike --ids 5,9,10
 kara strike --sev critical --dry-run     # 只出 targets.txt 与线索雏形，不发请求
+kara strike --target https://x --ports 80,443   # 不靠库、直接指定目标
 ```
 
 移交时线索一律标 `level=L1 / confidence=suspected`，执行层给的 `[L2/confirmed]` 写进证据串——

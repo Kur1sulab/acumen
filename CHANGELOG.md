@@ -22,6 +22,8 @@ kara strike --ports 8080 --litmus-arg -no-auth-probe
 - 线索雏形固定 `level=L1 / confidence=suspected`——Kara 不替执行层下结论。
 - 执行层的结论带 `[L2/confirmed]` 这类级别/置信写进证据串，L1 的条目交付时一眼看得出还没落地。
 - 公网目标自动加 `-allow-public`（litmus 是内网框架，默认只放行私网/回环）。
+- **`--target` 直通**：库里有的条目没有回访目标（白盒审计报告、离线产物进来的都这样），
+  这种交给 `kara strike --target https://x` 直接给目标；库里的命中只当线索用。
 - 产物：`~/.kara/strike/<时间戳>/{targets.txt, seed-findings.json, litmus/}`，报告与证据都在里面。
 
 实测（本地靶站）：Kara 只读扫出 6 条 high → litmus 验证出 9 条，
@@ -34,7 +36,7 @@ kara strike --ports 8080 --litmus-arg -no-auth-probe
 
 ### 测试
 
-- 133 个单测（新增 `tests/test_strike.py` 17 个：目标推导、L1 雏形、结论回写、
+- 134 个单测（新增 `tests/test_strike.py` 18 个：目标推导、L1 雏形、结论回写、
   级别保留、`--dry-run` 不发请求、执行层缺失时干净报错）。
 
 ## 1.5.0 — 2026-11-18

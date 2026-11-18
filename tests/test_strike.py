@@ -4,6 +4,8 @@
 验证「挑命中 → 生成清单 → 读回结论 → 归一化成 Kara 条目」这一段是准的。
 """
 
+import contextlib
+import io
 import json
 import os
 import sys
@@ -148,6 +150,18 @@ class TestStrikeCli(unittest.TestCase):
                                  "--sev", "high", "--dry-run", "--litmus-bin", "/nope/litmus"])
             self.assertEqual(code, 0, buf.getvalue())
             self.assertIn("dry-run", buf.getvalue().lower())
+
+    def test_direct_target_without_db_rows(self):
+        """库里一条命中都没有，也能直接给目标移交（白盒报告那类条目没有回访目标）。"""
+        with tempfile.TemporaryDirectory() as d:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = cli.main(["--db", os.path.join(d, "v.db"), "strike",
+                                 "--target", "https://example.com", "--dry-run"])
+            out = buf.getvalue()
+            self.assertEqual(code, 0, out)
+            self.assertIn("example.com", out)
+            self.assertIn("目标 1 个", out)
 
     def test_missing_litmus_errors_cleanly(self):
         with tempfile.TemporaryDirectory() as d:

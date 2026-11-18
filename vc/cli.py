@@ -428,11 +428,17 @@ def cmd_strike(ctx: Ctx, args: argparse.Namespace) -> int:
         rows = ctx.store.findings(sev=args.sev, status=args.status, q=args.q, limit=args.limit)["rows"]
         rows = [dict(r) for r in rows]
     rows = [r for r in rows if st.target_of(r)]
-    if not rows:
-        print("没有可移交的命中（要么库里没条目，要么这些条目没有可回访的目标）。")
+    direct = [t.strip() for t in (args.target or []) if t.strip()]
+    if not rows and not direct:
+        print("没有可移交的命中：库里这些条目没有可回访的目标（白盒报告、离线产物都算）。")
+        print("  两条出路：① 挑有 endpoint/asset 的条目（kara list --sev high）"
+              "　② 直接给目标：kara strike --target https://example.com")
         return 0
 
     targets = st.collect(rows)
+    for t in direct:
+        if t.lower() not in {x.lower() for x in targets}:
+            targets.append(t)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     work = os.path.abspath(os.path.expanduser(os.path.join("~/.kara/strike", stamp)))
     os.makedirs(work, exist_ok=True)
@@ -593,6 +599,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--status", default="", help="待验证 / 已确认 / 误报 …")
     p.add_argument("--q", default="", help="关键词")
     p.add_argument("--limit", type=int, default=20, help="最多挑多少条（默认 20）")
+    p.add_argument("--target", action="append", default=[],
+                   help="直接指定目标（不走库），可重复；与 --ids 一起用时库里的命中只作线索")
     p.add_argument("--dry-run", action="store_true", help="只生成目标清单与线索雏形，不发请求")
     p.add_argument("--litmus-bin", default="", help="litmus 可执行文件路径（默认自动找）")
     p.add_argument("--ports", default="", help="转给 litmus 的 -p：top100/top1000/full/80,443")
