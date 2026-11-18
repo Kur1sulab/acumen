@@ -579,16 +579,16 @@ func parseOrUsage(fs *flag.FlagSet, args []string, cmd, usage string) int {
 	if errors.Is(err, flag.ErrHelp) {
 		// fix3（audit low#6）：子命令内 -h/--help 对齐 argparse——打印本命令
 		// 用法后 exit 0（此前 flag 包报参数错误 exit 2）
-		fmt.Printf("用法: yata %s\n", usage)
+		fmt.Printf("用法: sweep %s\n", usage)
 		fs.PrintDefaults()
 		return 0
 	}
-	fmt.Printf("[!] 参数错误: %v\n  用法: yata %s\n", err, usage)
+	fmt.Printf("[!] 参数错误: %v\n  用法: sweep %s\n", err, usage)
 	return 2
 }
 
 func missingArgs(cmd, usage string) int {
-	fmt.Printf("[!] 缺少必填参数（subcommand=%s）\n  用法: yata %s\n", cmd, usage)
+	fmt.Printf("[!] 缺少必填参数（subcommand=%s）\n  用法: sweep %s\n", cmd, usage)
 	return 2
 }
 

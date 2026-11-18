@@ -456,7 +456,7 @@ func renderBaselineSection(a func(string), b map[string]any) {
 		return
 	}
 	a("## 9. 域名暴露面基线\n")
-	a("> 8 项零凭据体检（yata baseline）；详细数据见各 `<检查>.json`，未运行的检查无文件不展示\n")
+	a("> 8 项零凭据体检（sweep baseline）；详细数据见各 `<检查>.json`，未运行的检查无文件不展示\n")
 	for _, sec := range baselineSectionKeys {
 		m, ok := b[sec.key].(map[string]any)
 		if !ok || len(m) == 0 {

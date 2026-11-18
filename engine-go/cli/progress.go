@@ -66,7 +66,7 @@ func applyProgressFile(args []string) ([]string, int) {
 		switch {
 		case tok == "--progress-file": // fix3：argparse 不认下划线别名，仅精确长名
 			if len(args) < 2 {
-				fmt.Println("[!] --progress-file 需要一个路径参数\n\n用法: yata [--progress-file <path>] [-h] [-v] <子命令> ...")
+				fmt.Println("[!] --progress-file 需要一个路径参数\n\n用法: sweep [--progress-file <path>] [-h] [-v] <子命令> ...")
 				return nil, 2
 			}
 			setProgressFile(args[1])
