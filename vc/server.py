@@ -30,11 +30,13 @@ if __package__ in (None, ""):  # 允许 `python3 vc/server.py` 直接跑
     from vc.ingest import Ingestor
     from vc.scans import MODES as SCAN_MODES, ScanError, ScanManager
     from vc.store import Store, STATUS_CHOICES
+    from vc import verify as vfy
     from vc import __version__
 else:
     from .ingest import Ingestor
     from .scans import MODES as SCAN_MODES, ScanError, ScanManager
     from .store import Store, STATUS_CHOICES
+    from . import verify as vfy
     from . import __version__
 
 UI_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui")
@@ -48,6 +50,7 @@ class State:
     store: Store
     ingestor: Ingestor
     scans: Optional[ScanManager] = None
+    verifier: Optional["vfy.Verifier"] = None
     watcher: Optional[threading.Thread] = None
     stop = threading.Event()
 
@@ -125,11 +128,13 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/summary":
                 return self._json(STATE.store.summary())
             if path == "/api/findings":
-                return self._json(STATE.store.findings(
+                res = STATE.store.findings(
                     sev=q.get("sev", ""), asset=q.get("asset", ""), status=q.get("status", ""),
                     q=q.get("q", ""), limit=min(int(q.get("limit", 200) or 200), 1000),
                     offset=max(int(q.get("offset", 0) or 0), 0),
-                ))
+                )
+                vfy.enrich(res["rows"])  # 补「能不能复验 / 复现命令」两个派生字段
+                return self._json(res)
             if path == "/api/assets":
                 return self._json(STATE.store.assets(
                     q=q.get("q", ""), limit=min(int(q.get("limit", 300) or 300), 1000),
@@ -172,6 +177,11 @@ class Handler(BaseHTTPRequestHandler):
                 if not detail:
                     return self._err(404, f"任务 #{jid} 不存在")
                 return self._json(detail)
+            if path == "/api/verify/status":
+                if STATE.verifier is None:
+                    return self._json({"running": False, "total": 0, "done": 0, "current": "",
+                                       "engine": "", "summary": {}, "last": [], "elapsed": 0})
+                return self._json(STATE.verifier.status())
             if path == "/api/version":
                 return self._json({"ok": True, "version": __version__, "name": "鉴微 · Acumen"})
             if path == "/api/health":
@@ -204,6 +214,21 @@ class Handler(BaseHTTPRequestHandler):
                 n = STATE.store.set_status(ids, str(body.get("status") or ""))
                 STATE.store.log("info", f"状态更新：{n} 条 → {body.get('status')}")
                 return self._json({"ok": True, "updated": n})
+            if path == "/api/verify":
+                if not self._local_only():
+                    return self._err(403, "复验会真起引擎打目标，仅限本机操作")
+                ver = STATE.verifier
+                if ver is None:
+                    return self._json({"ok": False, "error": "复验未启用（没找到引擎）"}, 400)
+                ids = body.get("ids") or []
+                if not isinstance(ids, list):
+                    return self._err(400, "ids 必须是数组")
+                try:
+                    res = ver.start([int(x) for x in ids])
+                except (ValueError, RuntimeError) as exc:
+                    return self._json({"ok": False, "error": str(exc)}, 400)
+                STATE.store.log("info", f"复验请求：{res.get('queued')} 条（引擎重跑一遍确认还在不在）")
+                return self._json(res)
             if path == "/api/scan/start":
                 sm = self._need_scan()
                 if not sm:
@@ -317,6 +342,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             max_parallel=args.scan_parallel,
             ingest_cb=STATE.ingestor.scan,
         )
+        # 复验和扫描共用同一个引擎：复验本来就是「用同一个模式再跑一遍」
+        STATE.verifier = vfy.Verifier(STATE.store, engine=STATE.scans.engine,
+                                      timeout=args.scan_timeout,
+                                      log=lambda lvl, msg: STATE.store.log(lvl, msg))
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     url = f"http://{args.host}:{args.port}/"

@@ -437,6 +437,12 @@ def parse(text: str, path: str = "") -> Optional[ParseResult]:
             continue
         hit += 1
         r = fn(obj, host)
+        # 把引擎自己记下的 base 挂到每条命中上：复验要按原样的 scheme/host/port 重跑，
+        # 光靠 asset+port 反推会把 http 目标猜成 https，重跑必然空手而归（假「已消失」）。
+        base = str(obj.get("base") or "").strip() if isinstance(obj, dict) else ""
+        if base:
+            for f in r.findings:
+                f.setdefault("base", base)
         agg.findings.extend(r.findings)
         agg.assets.extend(r.assets)
         if r.note:

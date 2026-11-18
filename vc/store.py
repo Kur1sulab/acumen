@@ -68,7 +68,17 @@ class Store:
             cols = {r[1] for r in self.conn.execute("PRAGMA table_info(findings)")}
             if "cve" not in cols:
                 self.conn.execute("ALTER TABLE findings ADD COLUMN cve TEXT DEFAULT ''")
+            # v1.3.0：复证三件套 —— 复现命令 + 复验结论/时间/次数
+            for col, ddl in (("repro", "TEXT DEFAULT ''"),
+                             ("verify_state", "TEXT DEFAULT ''"),
+                             ("verify_at", "TEXT DEFAULT ''"),
+                             ("verify_times", "INTEGER DEFAULT 0"),
+                             ("verify_note", "TEXT DEFAULT ''"),
+                             ("base", "TEXT DEFAULT ''")):
+                if col not in cols:
+                    self.conn.execute(f"ALTER TABLE findings ADD COLUMN {col} {ddl}")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_f_cve ON findings(cve)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_f_vfy ON findings(verify_state)")
             self.conn.commit()
 
     # ------------------------------------------------------------ schema
@@ -86,7 +96,11 @@ class Store:
                     sources TEXT, evidence TEXT,
                     count INTEGER DEFAULT 1,
                     status TEXT DEFAULT '待验证',
-                    first_seen TEXT, last_seen TEXT, files TEXT
+                    first_seen TEXT, last_seen TEXT, files TEXT,
+                    repro TEXT DEFAULT '',
+                    verify_state TEXT DEFAULT '', verify_at TEXT DEFAULT '',
+                    verify_times INTEGER DEFAULT 0, verify_note TEXT DEFAULT '',
+                    base TEXT DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS idx_f_sev   ON findings(sev_rank DESC);
                 CREATE INDEX IF NOT EXISTS idx_f_asset ON findings(asset);
@@ -172,13 +186,14 @@ class Store:
                 if row is None:
                     self.conn.execute(
                         """INSERT INTO findings(key,asset,ip,port,endpoint,param,title,cve,sev,sev_rank,
-                                                sources,evidence,count,status,first_seen,last_seen,files)
-                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                                sources,evidence,count,status,first_seen,last_seen,files,repro,base)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (key, f.get("asset", ""), f.get("ip", ""), f.get("port"),
                          f.get("endpoint", ""), f.get("param", ""), f.get("title", ""),
                          f.get("cve", ""), sev, sev_rank(sev), f.get("source", ""), f.get("evidence", ""),
                          int(f.get("count") or 1), "待验证",
-                         f.get("first_seen") or ts, ts, src_file[-300:]),
+                         f.get("first_seen") or ts, ts, src_file[-300:],
+                         str(f.get("repro") or "")[:1200], str(f.get("base") or "")[:200]),
                     )
                     added += 1
                 else:
@@ -189,14 +204,17 @@ class Store:
                         """UPDATE findings SET count=?, sev=?, sev_rank=?, sources=?, evidence=?,
                                first_seen=?, last_seen=?, files=?, ip=COALESCE(NULLIF(ip,''),?), 
                                port=COALESCE(port,?),
-                               cve=?
+                               cve=?, repro=COALESCE(NULLIF(repro,''),?),
+                               base=COALESCE(NULLIF(base,''),?)
                            WHERE key=?""",
                         (row["count"] + int(f.get("count") or 1), best_sev, sev_rank(best_sev),
                          _merge_uniq(row["sources"], [f.get("source", "")]),
                          (row["evidence"] or f.get("evidence") or "")[:600],
                          first, last, _merge_uniq(row["files"], [src_file[-300:]]),
                          f.get("ip", ""), f.get("port"),
-                         _merge_uniq(row["cve"], [f.get("cve", "")], cap=8), key),
+                         _merge_uniq(row["cve"], [f.get("cve", "")], cap=8),
+                         str(f.get("repro") or "")[:1200],
+                         str(f.get("base") or "")[:200], key),
                     )
                     merged += 1
             self.conn.commit()
@@ -271,6 +289,9 @@ class Store:
                 """SELECT title, COUNT(*) n, MAX(sev_rank) r FROM findings
                    GROUP BY title ORDER BY r DESC, n DESC LIMIT 12""").fetchall()]
             last = self.conn.execute("SELECT MAX(scanned_at) t FROM files").fetchone()["t"]
+            by_verify = [dict(r) for r in self.conn.execute(
+                "SELECT verify_state, COUNT(*) n FROM findings GROUP BY verify_state").fetchall()]
+            repro_n = self.conn.execute("SELECT COUNT(*) c FROM findings WHERE repro<>''").fetchone()["c"]
         sev_counts = {s: 0 for s in SEV_ORDER}
         hits = {s: 0 for s in SEV_ORDER}
         for r in sev_rows:
@@ -286,6 +307,8 @@ class Store:
             "severity_hits": hits,
             "by_source": by_source,
             "by_status": by_status,
+            "by_verify": by_verify,
+            "repro": repro_n or 0,
             "top_assets": top_assets,
             "by_type": by_type,
             "last_scan": last,
@@ -434,19 +457,59 @@ class Store:
             self.conn.commit()
             return cur.rowcount
 
+    # ------------------------------------------------------------ 复证（v1.3.0）
+
+    def findings_by_ids(self, ids: List[int]) -> List[Dict[str, Any]]:
+        """按 id 取原始行——复验要的是每条命中的来源、目标、标题。"""
+        ids = [int(x) for x in (ids or [])]
+        if not ids:
+            return []
+        q = ",".join("?" * len(ids))
+        with self.lock:
+            rows = self.conn.execute(f"SELECT * FROM findings WHERE id IN ({q})", ids).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_verify(self, updates: List[Tuple[int, str, str]]) -> int:
+        """写复验结论：状态 + 依据 + 时间，次数自增。
+
+        单独一个方法（而不是塞进 set_status）是因为两者的语义完全不同：
+        状态是人判断的，复验是机器重跑出来的，混在一个字段里就再也分不清
+        哪条是「我确认过」，哪条是「工具刚又打了一枪」。
+        """
+        if not updates:
+            return 0
+        ts = _now()
+        n = 0
+        with self.lock:
+            for fid, state, note in updates:
+                cur = self.conn.execute(
+                    "UPDATE findings SET verify_state=?, verify_at=?, verify_times=verify_times+1, "
+                    "verify_note=? WHERE id=?",
+                    (str(state)[:20], ts, str(note or "")[:300], int(fid)))
+                n += cur.rowcount
+            self.conn.commit()
+        return n
+
+    def verify_stats(self) -> List[Dict[str, Any]]:
+        with self.lock:
+            return [dict(r) for r in self.conn.execute(
+                "SELECT verify_state, COUNT(*) n FROM findings GROUP BY verify_state").fetchall()]
+
     # ------------------------------------------------------------ 导出
 
     def export_csv(self, sev: str = "", status: str = "", q: str = "") -> str:
         buf = io.StringIO()
         w = csv.writer(buf)
-        w.writerow(["严重度", "漏洞名称", "资产", "IP", "端口", "端点", "参数", "命中次数", "来源", "状态", "首次发现", "最近发现", "证据"])
+        w.writerow(["严重度", "漏洞名称", "资产", "IP", "端口", "端点", "参数", "命中次数", "来源", "状态",
+                    "复验", "复验时间", "首次发现", "最近发现", "证据", "复现命令"])
         clause, args = self._filter(sev, status, q)
         with self.lock:
             rows = self.conn.execute(
                 f"SELECT * FROM findings {clause} ORDER BY sev_rank DESC, count DESC, asset", args).fetchall()
         for r in rows:
             w.writerow([r["sev"], r["title"], r["asset"], r["ip"], r["port"], r["endpoint"], r["param"],
-                        r["count"], r["sources"], r["status"], r["first_seen"], r["last_seen"], r["evidence"]])
+                        r["count"], r["sources"], r["status"], r["verify_state"], r["verify_at"],
+                        r["first_seen"], r["last_seen"], r["evidence"], r["repro"]])
         return buf.getvalue()
 
     def export_md(self, sev: str = "", status: str = "", q: str = "") -> str:
@@ -456,9 +519,12 @@ class Store:
         lines.append(f"- 资产：**{s['assets']}**　来源文件：**{s['files']}**")
         sev_txt = " / ".join(f"{k} {v}" for k, v in s["severity"].items() if v)
         lines.append(f"- 分级：{sev_txt or '（空）'}")
+        vfy = {r["verify_state"] or "（未复验）": r["n"] for r in s.get("by_verify") or []}
+        if vfy:
+            lines.append("- 复验：" + " / ".join(f"{k} {v}" for k, v in vfy.items()))
         lines += ["", "## 漏洞清单", "",
-                  "| 严重度 | 漏洞 | 资产 | 端点 | 命中 | 来源 | 状态 |",
-                  "|---|---|---|---|---|---|---|"]
+                  "| 严重度 | 漏洞 | 资产 | 端点 | 命中 | 来源 | 状态 | 复验 |",
+                  "|---|---|---|---|---|---|---|---|"]
         clause, args = self._filter(sev, status, q)
         with self.lock:
             rows = self.conn.execute(
@@ -466,7 +532,20 @@ class Store:
                 args).fetchall()
         for r in rows:
             ep = (r["endpoint"] or "").replace("|", "\\|")
-            lines.append(f"| {r['sev']} | {r['title']} | {r['asset']} | {ep} | {r['count']} | {r['sources']} | {r['status']} |")
+            lines.append(f"| {r['sev']} | {r['title']} | {r['asset']} | {ep} | {r['count']} | "
+                         f"{r['sources']} | {r['status']} | {r['verify_state'] or '未复验'} |")
+        repro = [r for r in rows if (r["repro"] or "").strip()]
+        if repro:
+            # 复现材料单独列出来：报告里能直接粘的那一段，比表格有用
+            lines += ["", "## 复现材料", ""]
+            for r in repro[:100]:
+                lines.append(f"### {r['title']}")
+                if r["endpoint"]:
+                    lines.append(f"- 端点：`{r['endpoint']}`")
+                lines.append(f"- 来源：`{r['sources']}`　复验：{r['verify_state'] or '未复验'}")
+                if (r["evidence"] or "").strip():
+                    lines.append(f"- 判据：{r['evidence']}")
+                lines += ["", "```bash", r["repro"].strip(), "```", ""]
         if s["top_assets"]:
             lines += ["", "## 按资产分布", "", "| 资产 | 条目 | 最高级别 |", "|---|---|---|"]
             rank_name = {5: "critical", 4: "high", 3: "medium", 2: "low", 1: "info"}

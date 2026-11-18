@@ -761,6 +761,35 @@ def iter_json_objects(text: str) -> List[Any]:
     return out
 
 
+_REPRO_BLOCK = re.compile(r"```(?:bash|sh)?\s*\n(.*?)```", re.S)
+
+
+def _attach_repro(res: ParseResult, path: str) -> None:
+    """把引擎取证目录里现成的复现命令挂到命中上。
+
+    引擎写证据时顺手生成了 repro.md（URL、状态码、判据、复现命令、预期现象），
+    这份东西的价值比表格里的任何一列都高——报告里能直接粘的就是它。
+    以前只在磁盘上躺着，现在随命中一起入库、一起导出。
+    """
+    norm = path.replace("\\", "/")
+    if "/evidence/" not in norm:
+        return
+    sib = os.path.join(os.path.dirname(path), "repro.md")
+    try:
+        with open(sib, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        return
+    m = _REPRO_BLOCK.search(text)
+    if not m:
+        return
+    cmd = m.group(1).strip()
+    if not cmd:
+        return
+    for f in res.findings:
+        f.setdefault("repro", cmd[:1200])
+
+
 def parse_file(path: str) -> ParseResult:
     """解析单个文件。任何异常都收敛成 note，不向上抛。"""
     norm = path.replace("\\", "/")
@@ -799,6 +828,7 @@ def parse_file(path: str) -> ParseResult:
             native = None
             _ = exc
         if native is not None:
+            _attach_repro(native, path)
             return native
     try:
         if fmt == "nessus":

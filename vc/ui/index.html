@@ -116,6 +116,10 @@
           <option>已修复</option>
           <option>已忽略</option>
         </select>
+        <button class="btn" id="btnVerify" title="用当初发现它的同一个模式重跑一次，看这条还在不在（复验会真打目标）">
+          <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 12a8.5 8.5 0 1 1-2.6-6.1"/><path d="M20.6 4.4v4.5h-4.5"/></svg></span>
+          复验
+        </button>
         <span class="grow"></span>
         <span id="selInfo" class="foot-note"></span>
       </div>
@@ -155,17 +159,19 @@
               <tr>
                 <th class="w-check"><input type="checkbox" id="checkAll"></th>
                 <th class="w-status">状态</th>
+                <th class="w-vfy">复验</th>
                 <th class="w-sev">严重程度</th>
                 <th class="w-src">来源</th>
-                <th>漏洞名称</th>
+                <th class="w-name">漏洞名称</th>
                 <th class="w-asset">资产</th>
                 <th class="w-url">URL / 端点</th>
                 <th class="w-num">命中</th>
                 <th class="w-time">发现时间</th>
               </tr>
             </thead>
-            <tbody id="findingsBody"><tr><td colspan="9" class="muted center">加载中…</td></tr></tbody>
+            <tbody id="findingsBody"><tr><td colspan="10" class="muted center">加载中…</td></tr></tbody>
           </table>
+          <div class="vbar hidden" id="vBar"><span id="vBarTxt"></span><i id="vBarFill"></i></div>
           <div class="pager">
             <button class="btn ghost small" id="prevPage">上一页</button>
             <span id="pageInfo" class="muted">—</span>
@@ -268,6 +274,29 @@
       </div>
     </div>
   </main>
+</div>
+<div id="fDetail" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-head">
+      <strong id="fdTitle">命中详情</strong>
+      <span class="grow"></span>
+      <button class="btn ghost small" id="fdRun" title="用同一个模式重跑一次">复验这条</button>
+      <button class="btn ghost small" id="fdClose">关闭</button>
+    </div>
+    <div class="modal-body">
+      <div class="fd-grid">
+        <div class="fd-k">端点</div><div class="fd-v mono" id="fdUrl"></div>
+        <div class="fd-k">来源</div><div class="fd-v mono" id="fdSrc"></div>
+        <div class="fd-k">判据</div><div class="fd-v" id="fdEv"></div>
+        <div class="fd-k">复验</div><div class="fd-v" id="fdVfy"></div>
+      </div>
+      <div class="fd-cmdhead">
+        <span>复现命令</span>
+        <button class="btn ghost small" id="fdCopy">复制</button>
+      </div>
+      <pre id="fdCmd" class="fd-cmd"></pre>
+    </div>
+  </div>
 </div>
 <div id="toast" class="toast"></div>
 <script src="/ui/app.js"></script>

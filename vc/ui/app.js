@@ -200,6 +200,24 @@
 
   // ------------------------------------------------------------ 漏洞表
 
+  // 复验徽章：机器重跑出来的结论，和「状态」那一列（人判断的）分开显示。
+  // 不可复验的条目也照实说——比给个「已消失」干净。
+  const VFY_CN = { '仍存在': 'still', '已消失': 'gone', '无法判定': 'unknown', '不可复验': 'na' };
+
+  function vfyCell(r) {
+    const vs = String(r.verify_state || '');
+    const cls = VFY_CN[vs] || 'todo';
+    const txt = vs || '未复验';
+    const times = Number(r.verify_times || 0);
+    const tip = vs
+      ? `复验 ${times} 次，最近 ${r.verify_at || '—'}${r.verify_note ? '\n' + r.verify_note : ''}\n点开看复现命令`
+      : (r.verify_hint || '还没复验过：点 ↻ 用同一个模式重跑一次，看这条还在不在');
+    const run = r.verifiable
+      ? `<button class="vrun" data-vrun="${r.id}" title="用同一个模式重跑一次">↻</button>`
+      : '<span class="muted vrun-none" title="离线报告类条目没有可回访的目标">—</span>';
+    return `<div class="vfycell"><span class="vfy v-${cls}" data-open="${r.id}" title="${esc(tip)}">${esc(txt)}</span>${run}</div>`;
+  }
+
   function rowHtml(r) {
     const sel = state.selected.has(r.id) ? 'sel' : '';
     const evText = r.evidence ? String(r.evidence).slice(0, 260) : '';
@@ -235,6 +253,7 @@
     return `<tr class="${sel}" data-id="${r.id}">
       <td class="w-check"><input type="checkbox" class="rowCheck" data-id="${r.id}" ${sel ? 'checked' : ''}></td>
       <td><select class="status-select" data-id="${r.id}" data-s="${esc(r.status)}">${statusOpts}</select></td>
+      <td class="w-vfy">${vfyCell(r)}</td>
       <td><span class="sev ${esc(r.sev)}">${esc(sevCn)}</span></td>
       <td class="mono src-cell" title="${esc(r.sources)}">${esc(srcLabel(r.sources))}</td>
       <td><div class="title-cell" title="${esc(r.title)}">${cveBadge}${esc(r.title)}</div>${evTitle}</td>
@@ -253,13 +272,16 @@
     const data = await api('/api/findings?' + qs.toString());
     state.total = data.total;
     const rows = data.rows || [];
+    // 内存留一份，复验弹窗/单行复验都靠它取原始值（不另发请求）
+    state.rows = rows;
+    state.byId = new Map(rows.map((r) => [Number(r.id), r]));
     // 整列都是「—」的表格纯粹是噪声：这一页数据没有资产/端点时，直接把 URL 列收起来
     const anyUrl = rows.some((r) => r.asset || r.endpoint || r.param);
     const tbl = document.querySelector('#view-findings table');
     if (tbl) tbl.classList.toggle('hide-url', !anyUrl);
     $('#findingsBody').innerHTML = rows.length
       ? rows.map(rowHtml).join('')
-      : `<tr><td colspan="${anyUrl ? 9 : 8}" class="muted center">没有匹配记录${state.q || state.sev || state.status ? '（试试清空筛选）' : ''}</td></tr>`;
+      : `<tr><td colspan="${anyUrl ? 10 : 9}" class="muted center">没有匹配记录${state.q || state.sev || state.status ? '（试试清空筛选）' : ''}</td></tr>`;
     const from = state.total === 0 ? 0 : state.offset + 1;
     $('#pageInfo').textContent = `${from}–${Math.min(state.offset + rows.length, state.total)} / 共 ${state.total}`;
     $('#prevPage').disabled = state.offset <= 0;
@@ -793,6 +815,120 @@
 
   // ------------------------------------------------------------ 事件
 
+  // ------------------------------------------------------------ 复验
+  //
+  // 这一页不是看板。看板把结果画完就结束了；这里每条命中都能点开看「凭什么算命中」，
+  // 再用当初发现它的同一个模式重跑一次，看「现在还活着吗」。
+  // 结论一律由引擎给，前端只负责显示——猜出来的「已修复」比不写更害人。
+
+  const vfy = { timer: null, openId: null };
+
+  function openDetail(id) {
+    const r = state.byId && state.byId.get(Number(id));
+    if (!r) return;
+    vfy.openId = Number(id);
+    $('#fdTitle').textContent = r.title || '命中详情';
+    $('#fdUrl').textContent = r.endpoint || '—';
+    $('#fdSrc').textContent = srcLabel(r.sources) || '—';
+    $('#fdEv').textContent = r.evidence || '（引擎没留证据文本，下面那条命令自己跑一遍就是证据）';
+    const vs = String(r.verify_state || '');
+    if (vs) {
+      const n = Number(r.verify_times || 0);
+      $('#fdVfy').textContent = `${vs}${n > 1 ? `（第 ${n} 次复验）` : ''}${r.verify_at ? ` · ${String(r.verify_at).slice(0, 16)}` : ''}${r.verify_note ? ' —— ' + r.verify_note : ''}`;
+    } else {
+      $('#fdVfy').textContent = r.verifiable ? '还没复验过，点右上「复验这条」' : (r.verify_hint || '这条不可复验');
+    }
+    $('#fdCmd').textContent = r.repro || '（这条没留复现命令，按端点自己发一次请求即可）';
+    $('#fdRun').style.display = r.verifiable ? '' : 'none';
+    $('#fDetail').classList.remove('hidden');
+  }
+
+  function closeDetail() {
+    $('#fDetail').classList.add('hidden');
+    vfy.openId = null;
+  }
+
+  async function runVerify(ids) {
+    const list = (ids || []).map(Number).filter(Boolean);
+    if (!list.length) { toast('先勾选要复验的条目'); return; }
+    try {
+      const r = await api('/api/verify', { method: 'POST', body: JSON.stringify({ ids: list }) });
+      if (r.ok === false) { toast('复验没起来：' + (r.error || '未知原因'), 6000); return; }
+      toast(`复验已开始：${r.queued || list.length} 条（引擎重跑，别眨眼）`);
+      closeDetail();
+      pollVerify();
+    } catch (err) {
+      toast('复验失败：' + err.message, 6000);
+    }
+  }
+
+  async function pollVerify() {
+    if (vfy.timer) return;
+    const bar = $('#vBar');
+    const tick = async () => {
+      let s;
+      try { s = await api('/api/verify/status'); } catch (err) { vfy.timer = null; bar.classList.add('hidden'); return; }
+      if (!s.running) {
+        clearInterval(vfy.timer);
+        vfy.timer = null;
+        if (s.total) {
+          const sum = s.summary || {};
+          const parts = Object.keys(sum).map((k) => `${k} ${sum[k]}`);
+          bar.classList.add('hidden');
+          toast(`复验跑完了：${parts.length ? parts.join(' / ') : '没有结论'}`, 6000);
+          await refreshAll('');
+        } else {
+          bar.classList.add('hidden');
+        }
+        return;
+      }
+      bar.classList.remove('hidden');
+      const pct = s.total ? Math.round((s.done / s.total) * 100) : 0;
+      $('#vBarTxt').textContent = `复验中 ${s.done}/${s.total} · ${s.current || '…'} · ${s.elapsed || 0}s`;
+      $('#vBarFill').style.width = pct + '%';
+    };
+    vfy.timer = setInterval(tick, 900);
+    tick();
+  }
+
+  function bindVerify() {
+    const btn = $('#btnVerify');
+    if (btn) btn.addEventListener('click', () => runVerify(Array.from(state.selected)));
+
+    document.addEventListener('click', (e) => {
+      const run = e.target.closest('[data-vrun]');
+      if (run) { e.stopPropagation(); runVerify([run.dataset.vrun]); return; }
+      const badge = e.target.closest('[data-open]');
+      if (badge && badge.dataset.open) { openDetail(badge.dataset.open); return; }
+      if (e.target.id === 'fDetail') { closeDetail(); return; }
+    });
+
+    const close = $('#fdClose');
+    if (close) close.addEventListener('click', closeDetail);
+    const fdRun = $('#fdRun');
+    if (fdRun) fdRun.addEventListener('click', () => { if (vfy.openId) runVerify([vfy.openId]); });
+    const copy = $('#fdCopy');
+    if (copy) copy.addEventListener('click', async () => {
+      const text = $('#fdCmd').textContent || '';
+      if (!text) return;
+      try {
+        await navigator.clipboard.writeText(text);
+        toast('复现命令已复制');
+      } catch (err) {
+        // http 页面上 clipboard 可能不可用，退回选中文本让人自己 ⌘C
+        const rng = document.createRange();
+        rng.selectNodeContents($('#fdCmd'));
+        const s = window.getSelection();
+        s.removeAllRanges();
+        s.addRange(rng);
+        toast('已选中命令，按 ⌘C / Ctrl+C 复制');
+      }
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !$('#fDetail').classList.contains('hidden')) closeDetail();
+    });
+  }
+
   function bind() {
     document.addEventListener('click', async (e) => {
       const chip = e.target.closest('.chip');
@@ -1072,6 +1208,8 @@
     } catch (e) { /* 隐私模式忽略 */ }
     document.body.dataset.tab = state.tab;
     bind();
+    bindVerify();     // 复验：勾选重跑 / 单条重跑 / 详情看复现命令
+    pollVerify();     // 后台本来就在跑复验的话，接上进度
     loadVersion();    // 版本号（后端注入）
     loadScanMeta();   // 引擎探测放后台，不挡首屏
     try {

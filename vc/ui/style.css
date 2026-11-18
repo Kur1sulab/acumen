@@ -969,17 +969,77 @@ a { color: inherit; }
 
 .table tbody tr:last-child td { border-bottom: 0; }
 
-/* 列宽（天穹式窄列 + 宽名称/URL） */
-.table thead th:nth-child(5) { width: 33%; }
-.table thead th:nth-child(7) { width: 21%; }
+/* 列宽（天穹式窄列 + 宽名称/URL）
+   注意：这里按 class 给宽，不要用 nth-child —— 中间插一列（比如「复验」）
+   会把整张表的列宽全部错位（曾经把来源撑到 33%、名称挤成 42px）。 */
+.w-name { width: 33%; }
+.w-url { width: 21%; }
 
 .w-check { width: 38px; }
 .w-status { width: 84px; }
+.w-vfy { width: 88px; }
+
+/* 复验徽章：机器跑出来的结论，和「状态」那种人判断的字段在视觉上分开 */
+.vfycell { display: flex; align-items: center; gap: 3px; white-space: nowrap; }
+.vfycell .vfy { flex: 0 0 auto; }
+.vfycell .vrun { flex: 0 0 auto; }
+.vfy {
+  display: inline-block; max-width: 62px; overflow: hidden; text-overflow: ellipsis;
+  font-size: 10.5px; line-height: 1.55; padding: 0 5px; border-radius: 5px;
+  border: 1px solid var(--line-strong); color: var(--muted); background: transparent;
+  white-space: nowrap; cursor: pointer; vertical-align: middle;
+}
+.vfy.v-still { color: var(--crit); background: var(--crit-soft); border-color: var(--crit-line); }
+.vfy.v-gone { color: var(--ok); background: transparent; border-color: color-mix(in srgb, var(--ok) 34%, transparent); }
+.vfy.v-unknown { color: var(--high); background: var(--high-soft); border-color: var(--high-line); }
+.vfy.v-na { color: var(--faint); background: var(--line-soft); border-color: var(--line); }
+.vfy.v-todo { border-style: dashed; color: var(--faint); }
+.vfy:hover { filter: brightness(0.97); }
+
+.vrun {
+  margin-left: 3px; padding: 0 4px; line-height: 1.4; font-size: 11px; cursor: pointer;
+  border: 1px solid var(--line-strong); border-radius: 5px; background: var(--panel-solid);
+  color: var(--muted); vertical-align: middle;
+}
+.vrun:hover { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
+.vrun:disabled { opacity: 0.5; cursor: default; }
+.vrun-none { margin-left: 3px; font-size: 11px; }
+
+/* 复验进度条：贴着表格下沿，只显示「跑到第几条 + 现在在跑谁」 */
+.vbar { position: relative; margin: 8px 0 0; height: 20px; border-radius: 6px; background: var(--line-soft); overflow: hidden; }
+.vbar > span {
+  position: relative; z-index: 1; display: block; padding: 2px 8px;
+  font-size: 11px; color: var(--fg-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.vbar > i {
+  position: absolute; left: 0; top: 0; bottom: 0; width: 0;
+  background: var(--accent-soft-2); transition: width 0.35s ease;
+}
+
+/* 命中详情：复现命令的落点。不是弹个「详情」，是把「凭什么算命中」摊开给人看 */
+.modal { position: fixed; inset: 0; z-index: 60; background: rgba(8, 12, 20, 0.42); display: flex; align-items: center; justify-content: center; padding: 24px; }
+.modal-card {
+  width: min(760px, 100%); max-height: 82vh; display: flex; flex-direction: column;
+  background: var(--panel-solid); border: 1px solid var(--line-strong); border-radius: 12px;
+  box-shadow: var(--shadow-3); overflow: hidden;
+}
+.modal-head { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+.modal-head strong { font-size: 13px; font-weight: 600; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.modal-body { padding: 12px 14px 16px; overflow: auto; }
+.fd-grid { display: grid; grid-template-columns: 52px 1fr; gap: 6px 10px; align-items: start; }
+.fd-k { font-size: 11px; color: var(--faint); padding-top: 2px; }
+.fd-v { font-size: 12px; color: var(--fg-dim); word-break: break-all; white-space: pre-wrap; }
+.fd-cmdhead { display: flex; align-items: center; gap: 8px; margin: 14px 0 6px; font-size: 11px; color: var(--faint); }
+.fd-cmd {
+  margin: 0; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line);
+  background: var(--fill); color: var(--fg-dim); font-size: 11.5px; line-height: 1.6;
+  overflow: auto; max-height: 260px; white-space: pre-wrap; word-break: break-all;
+}
 .w-sev { width: 92px; }
-.w-src { width: 104px; }
+.w-src { width: 92px; }
 .w-asset { width: 168px; }
 .w-num { width: 58px; text-align: right; }
-.w-time { width: 138px; }
+.w-time { width: 118px; }
 
 .table thead th.w-num { text-align: right; }
 
