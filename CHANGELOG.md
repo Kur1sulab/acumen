@@ -3,6 +3,35 @@
 版本号按 [语义化版本](https://semver.org/lang/zh-CN/)：修 bug 走 patch，加能力走 minor，
 输出格式或数据库结构不兼容才走 major。
 
+## 1.9.4 — 2026-11-19
+
+### 新增 · list 的存活维度——每条命中回答「现在还活着吗」
+
+产品承诺是「每一条命中都回答：现在还活着吗」，但 `kara list` 此前只能看「命中了什么」：
+列表的「状态」列是工作流状态（待验证 / 已确认 / …），复验结论（`findings.verify_state`）
+一直躺在库里——存量哪些活着、哪些死了、哪些从没复验过，只能人工对库。这次把答案抬到命令行上。
+
+- 存活从唯一真相源推导：`vc/verify.py` 新增 `liveness_of()` / `liveness_summary()`，
+  只翻译 `verify_state`（`set_verify` 的写回字段），不造第二套判定。五态：
+  `ALIVE`（仍存在）/ `DEAD`（已消失）/ `UNVERIFIED`（空结论 = 从没复验过）/
+  `UNKNOWN`（无法判定）/ `NA`（不可复验）。**后两者不并进 UNVERIFIED**——
+  「复验过但没结论」「没有可回访的目标」都不是「从没复验过」，并进去待办积压永远清不完。
+  认不出的结论字符串归 UNVERIFIED：宁可再跑一遍，也不猜活着或死了。
+- `kara list`：表格加「存活」列（符号 + 文字：● ALIVE / ○ DEAD / — UNVERIFIED / ? UNKNOWN / ∅ NA），
+  顶部一行全库汇总（五桶之和恒等于命中总数，不随 --sev/--q/--liveness 变；筛选后条数看底部「共 N 条」）；
+  `--liveness unverified` 拎出从没复验过的命中，行尾给出 `kara verify --liveness unverified`。
+  `kara verify --liveness …` 同口径挑命中（--ids 优先）。状态页与 CSV/MD 导出同步：
+  CSV 加「存活」列、MD 摘要加「存活：」行——导出的就是你看到的。
+- 输出纪律（黑白灰为主）：三态靠符号 + 文字承载，颜色只点单个字符的符号
+  （●红 / ○绿 / —黄 / ?青 / ∅暗灰）；汇总非零数字加粗、零桶淡化，不靠红黄绿；
+  无整行染色、无背景色块；NO_COLOR / 非 TTY 自动关色（WCAG 1.4.1：颜色不得单独承载信息）。
+- 顺手修一个既有对齐缺陷：`_w()` 量宽前先剥 ANSI 序列——原先 TTY 下带色单元格
+  （表头 / 严重度）被误判「已够宽」而不垫空格，表头与数据行错位；东亚宽字符仍按 2 列计。
+- `tests/test_liveness.py`（新，31 用例）：推导 / 五桶求和 / 筛选（含 NULL 兼容、
+  UNKNOWN/NA 不混入 UNVERIFIED）/ 汇总全库口径 / 配色纪律（色只点符号、无背景块）/
+  TTY 与非 TTY 对齐 / 中文截断对齐 / 复验闭环（假引擎：只挑 UNVERIFIED、ALIVE 不被碰）/ CSV/MD 同口径。
+- 194 个单测全绿（存量 163 + 新增 31）；`tools/check_offline.py` / `check_zero_deps.py` 通过。
+
 ## 1.9.3 — 2026-11-19
 
 ### 修复 · scan 的 `--timeout` 不再依赖引擎「吐输出」才生效

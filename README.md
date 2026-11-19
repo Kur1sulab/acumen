@@ -11,8 +11,8 @@ CVE 匹配 → 深度验证，扫完自动出一份**带证据与复现步骤**�
 ```bash
 kara                             # 状态：引擎、库、存量
 kara scan -t <目标> [-m 模式]     # 扫（扫完自动生成报告）
-kara list [-i 序号] [--assets]   # 看（--csv / --md 导出）
-kara verify [--ids …] [--deep]   # 复验（--deep 用验证内核真打）
+kara list [-i 序号] [--assets] [--liveness …]   # 看（--csv / --md 导出）
+kara verify [--ids …] [--liveness …] [--deep]   # 复验（--deep 用验证内核真打）
 ```
 
 ```bash
@@ -23,7 +23,9 @@ kara scan -t http://10.0.0.5:8080 -m api
 kara scan -t http://10.0.0.5 -m cve
 kara scan -t http://10.0.0.5 -m strike
 kara list --sev high                  # 看高危
+kara list --liveness unverified       # 拎出从没复验过的命中（alive/dead/unverified/unknown/na）
 kara list -i 12                       # 单条：判据 / 证据 / 复现命令
+kara verify --liveness unverified     # 只复验从没复验过的
 kara verify --deep --sev high         # 对已有命中真打一轮
 ```
 
@@ -69,6 +71,9 @@ kara verify --deep --sev high         # 对已有命中真打一轮
 - **分级判据**：路径可达 ≠ 高危（凭据 / 源码 / 配置 / 备份 / 运维端点才 high）；JS 敏感串二次判定。
 - **复验**：按当初发现它的同一个模式重跑，结论分「仍存在 / 已消失 / 无法判定 / 不可复验」——**连不上目标不算已消失**。
   覆盖全部产出漏洞判定的原生模式：paths / api / jsintel / baseline 三检查（含 TLS 证书链）/ strike / brute / cve。
+- **存活维度**：`kara list` 每条命中带存活状态（● ALIVE / ○ DEAD / — UNVERIFIED / ? UNKNOWN / ∅ NA），
+  顶部一行全库汇总；`--liveness unverified` 拎出从没复验过的。「无法判定 / 不可复验」不混入「未复验」——
+  复验过但没结论、没有可回访的目标，都不是「从没复验过」。
 - **吃别家产物**：nuclei / xray / nmap / nessus / yakit / CSV / MD 表格 / 原始 HTTP 报文丢进收件箱，自动归一化进同一张表。
 
 ## 安装与引擎

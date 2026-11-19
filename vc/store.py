@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .parsers import sev_rank, max_sev
+from .verify import (LIVENESS_LABELS, LIVENESS_STATES, LIVENESS_TOKENS,
+                     liveness_of, liveness_summary)
 
 SEV_ORDER = ("critical", "high", "medium", "low", "info")
 STATUS_CHOICES = ("待验证", "已确认", "误报", "已修复", "已忽略")
@@ -315,7 +317,8 @@ class Store:
         }
 
     @staticmethod
-    def _filter(sev: str = "", status: str = "", q: str = "", asset: str = "") -> Tuple[str, List[Any]]:
+    def _filter(sev: str = "", status: str = "", q: str = "", asset: str = "",
+                liveness: str = "") -> Tuple[str, List[Any]]:
         """筛选子句：列表页与导出共用同一套条件，保证「导出的就是你看到的」。"""
         where: List[str] = []
         args: List[Any] = []
@@ -325,6 +328,17 @@ class Store:
         if status:
             where.append("status=?")
             args.append(status)
+        if liveness:
+            # 存活状态从 verify_state 翻译而来（唯一真相源，见 verify.liveness_of）。
+            # UNVERIFIED = 从没写过复验结论；老库迁移行可能是 NULL，一并算上。
+            token = str(liveness).strip().upper()
+            if token not in LIVENESS_STATES:
+                raise ValueError(f"未知存活状态：{liveness}")
+            if token == "UNVERIFIED":
+                where.append("(verify_state IS NULL OR verify_state='')")
+            else:
+                where.append("verify_state=?")
+                args.append(LIVENESS_STATES[token])
         if asset:
             where.append("asset LIKE ?")
             args.append(f"%{asset}%")
@@ -334,8 +348,8 @@ class Store:
         return (("WHERE " + " AND ".join(where)) if where else ""), args
 
     def findings(self, sev: str = "", asset: str = "", status: str = "", q: str = "",
-                 limit: int = 200, offset: int = 0) -> Dict[str, Any]:
-        clause, args = self._filter(sev, status, q, asset)
+                 limit: int = 200, offset: int = 0, liveness: str = "") -> Dict[str, Any]:
+        clause, args = self._filter(sev, status, q, asset, liveness=liveness)
         with self.lock:
             total = self.conn.execute(f"SELECT COUNT(*) c FROM findings {clause}", args).fetchone()["c"]
             rows = self.conn.execute(
@@ -497,22 +511,24 @@ class Store:
 
     # ------------------------------------------------------------ 导出
 
-    def export_csv(self, sev: str = "", status: str = "", q: str = "") -> str:
+    def export_csv(self, sev: str = "", status: str = "", q: str = "",
+                   liveness: str = "") -> str:
         buf = io.StringIO()
         w = csv.writer(buf)
         w.writerow(["严重度", "漏洞名称", "资产", "IP", "端口", "端点", "参数", "命中次数", "来源", "状态",
-                    "复验", "复验时间", "首次发现", "最近发现", "证据", "复现命令"])
-        clause, args = self._filter(sev, status, q)
+                    "存活", "复验", "复验时间", "首次发现", "最近发现", "证据", "复现命令"])
+        clause, args = self._filter(sev, status, q, liveness=liveness)
         with self.lock:
             rows = self.conn.execute(
                 f"SELECT * FROM findings {clause} ORDER BY sev_rank DESC, count DESC, asset", args).fetchall()
         for r in rows:
             w.writerow([r["sev"], r["title"], r["asset"], r["ip"], r["port"], r["endpoint"], r["param"],
-                        r["count"], r["sources"], r["status"], r["verify_state"], r["verify_at"],
+                        r["count"], r["sources"], r["status"], liveness_of(r), r["verify_state"], r["verify_at"],
                         r["first_seen"], r["last_seen"], r["evidence"], r["repro"]])
         return buf.getvalue()
 
-    def export_md(self, sev: str = "", status: str = "", q: str = "") -> str:
+    def export_md(self, sev: str = "", status: str = "", q: str = "",
+                  liveness: str = "") -> str:
         s = self.summary()
         lines = [f"# 漏扫结果整理（{s['generated_at']}）", ""]
         lines.append(f"- 发现条目：**{s['findings']}**（累计命中 {s['hits']} 次）")
@@ -522,10 +538,12 @@ class Store:
         vfy = {r["verify_state"] or "（未复验）": r["n"] for r in s.get("by_verify") or []}
         if vfy:
             lines.append("- 复验：" + " / ".join(f"{k} {v}" for k, v in vfy.items()))
+        live = liveness_summary(s.get("by_verify") or [])
+        lines.append("- 存活：" + " / ".join(f"{LIVENESS_LABELS[t]} {live[t]}" for t in LIVENESS_TOKENS))
         lines += ["", "## 漏洞清单", "",
                   "| 严重度 | 漏洞 | 资产 | 端点 | 命中 | 来源 | 状态 | 复验 |",
                   "|---|---|---|---|---|---|---|---|"]
-        clause, args = self._filter(sev, status, q)
+        clause, args = self._filter(sev, status, q, liveness=liveness)
         with self.lock:
             rows = self.conn.execute(
                 f"SELECT * FROM findings {clause} ORDER BY sev_rank DESC, count DESC LIMIT 500",

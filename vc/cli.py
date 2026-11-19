@@ -5,6 +5,7 @@
     kara                              # 状态：引擎、库、存量
     kara scan -t <目标> [-m 模式]      # 扫（-m strike 就是深度验证）
     kara list [-i 序号] [--assets]    # 看（列表 / 详情 / 资产 / 导出）
+    kara list --liveness unverified   # 拎出从没复验过的命中（alive/dead/unverified/unknown/na）
     kara verify [--ids …] [--deep]    # 复验（--deep 用验证内核真打）
 
 约束：
@@ -37,6 +38,11 @@ from .store import Store
 TERMINAL_STATUS = ("ok", "partial", "failed", "stopped", "interrupted", "timeout")
 SEV_COLOR = {"critical": "35", "high": "31", "medium": "33", "low": "36", "info": "90"}
 SEV_ORDER = ("critical", "high", "medium", "low", "info")
+# 存活状态配色（黑白灰为主）：颜色只落在单个字符的符号上，状态词与数字一律不着色。
+# 三态靠符号 + 文字区分（● ○ — ? ∅），色盲 / NO_COLOR / 非 TTY 不丢任何信息
+# （WCAG 1.4.1：颜色不得单独承载信息）。语义沿用严重度色板，不引新色相：
+# ●红=漏洞还活着　○绿=确认已消失　—黄=待复验　?青=没结论　∅暗灰=不可复验。
+LIVE_COLOR = {"ALIVE": "31", "DEAD": "32", "UNVERIFIED": "33", "UNKNOWN": "36", "NA": "90"}
 
 
 # ---------------------------------------------------------------- 输出小工具
@@ -53,9 +59,49 @@ def _sev(sev: str) -> str:
     return _c(f"{sev:<8}", SEV_COLOR.get(sev, "0"))
 
 
+def _live(token: str) -> str:
+    """存活列：符号 + 文字承载语义，颜色只点单个字符的符号。
+
+    先按列宽垫平再给符号上色（ANSI 序列不计显示宽度，与 _sev 同一手法）。
+    """
+    sym = vfy.LIVENESS_SYMBOLS[token]
+    text = f"{sym} {token}"
+    pad = " " * max(0, 12 - _w(text))
+    return _c(sym, LIVE_COLOR.get(token, "")) + f" {token}" + pad
+
+
+def _liveness_line(counts: Dict[str, int]) -> str:
+    """汇总行：黑白灰为主——非零桶数字加粗、零桶整体淡化，不靠红黄绿。
+
+    五桶恒显示、加起来等于命中总数；符号与列表列一致。
+    """
+    parts = []
+    for t in vfy.LIVENESS_TOKENS:
+        n = counts.get(t, 0)
+        seg = f"{vfy.LIVENESS_SYMBOLS[t]} {vfy.LIVENESS_LABELS[t]} "
+        parts.append(seg + _c(str(n), "1") if n else _c(seg + "0", "90"))
+    return " · ".join(parts)
+
+
+def _norm_liveness(raw: str) -> str:
+    tok = (raw or "").strip().upper()
+    if tok and tok not in vfy.LIVENESS_STATES:
+        raise ValueError(f"未知存活状态：{raw}（可选 "
+                         + " / ".join(t.lower() for t in vfy.LIVENESS_TOKENS) + "）")
+    return tok
+
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
 def _w(s: Any) -> int:
-    """显示宽度：东亚宽字符算 2 列（表格别错位）。"""
+    """显示宽度：东亚宽字符算 2 列（表格别错位）。
+
+    先剥 ANSI 色序再量——转义序列不占显示列；否则 TTY 下带色单元格
+    （表头/严重度/存活）会被误判「已够宽」而不垫空格，整行错位。
+    """
     s = "" if s is None else str(s)
+    s = _ANSI.sub("", s)
     return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in s)
 
 
@@ -270,12 +316,13 @@ def cmd_status(ctx: Ctx, args: argparse.Namespace) -> int:
     sev = s["severity"]
     print(f"  存量　漏洞 {s['findings']} 条 / 命中 {s['hits']} 次　资产 {s['assets']}　文件 {s['files']}")
     print("  分级　" + "　".join(f"{k} {sev.get(k, 0)}" for k in SEV_ORDER))
+    print("  存活　" + _liveness_line(vfy.liveness_summary(s.get("by_verify") or [])))
     if s.get("last_scan"):
         print(f"  最近　{s['last_scan']}")
     print()
     print("  kara scan -t <目标> [-m 模式]　扫（-m strike = 深度验证，会真发请求）")
-    print("  kara list [-i 序号] [--assets]　看（--csv/--md 导出）")
-    print("  kara verify [--ids …] [--deep]　复验")
+    print("  kara list [-i 序号] [--assets] [--liveness …]　看（--csv/--md 导出）")
+    print("  kara verify [--ids …] [--liveness …] [--deep]　复验")
     return 0
 
 
@@ -366,13 +413,20 @@ def _ports_text(ports: Any, cap: int = 8) -> str:
 
 
 def cmd_list(ctx: Ctx, args: argparse.Namespace) -> int:
+    try:
+        liveness = _norm_liveness(getattr(args, "liveness", ""))
+    except ValueError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 2
     if args.csv or args.md:
         out = os.path.abspath(os.path.expanduser(args.csv or args.md))
         if args.csv:
             # 带 BOM：Windows Excel 双击不乱码
-            data = ctx.store.export_csv(sev=args.sev, status=args.status, q=args.q).encode("utf-8-sig")
+            data = ctx.store.export_csv(sev=args.sev, status=args.status, q=args.q,
+                                        liveness=liveness).encode("utf-8-sig")
         else:
-            rows = ctx.store.findings(sev=args.sev, status=args.status, q=args.q, limit=10000)["rows"]
+            rows = ctx.store.findings(sev=args.sev, status=args.status, q=args.q,
+                                      limit=10000, liveness=liveness)["rows"]
             data = kreport.render(rows, title="空境 Kara 漏洞清单", db=ctx.db,
                                   notes=["按当前筛选条件导出的清单（与自动报告同一渲染器）"]).encode("utf-8")
         with open(out, "wb") as fh:
@@ -400,18 +454,26 @@ def cmd_list(ctx: Ctx, args: argparse.Namespace) -> int:
         print(f"\n共 {data['total']} 个资产（显示 {len(rows)}）")
         return 0
 
-    data = ctx.store.findings(sev=args.sev, status=args.status, q=args.q, limit=args.limit)
+    # 汇总先行：产品承诺「每一条命中都回答：现在还活着吗」，存量分布放第一行。
+    # 这是全库口径（不随 --sev/--q/--liveness 变），筛选后的条数看底部「共 N 条」。
+    print("存量　" + _liveness_line(vfy.liveness_summary(ctx.store.verify_stats())))
+    print()
+    data = ctx.store.findings(sev=args.sev, status=args.status, q=args.q,
+                              limit=args.limit, liveness=liveness)
     rows = data["rows"]
     if not rows:
         print("库里没有符合条件的条目。先 kara scan。")
         return 0
-    print(_table(["ID", "严重度", "标题", "资产", "端点", "级别", "次数", "状态"],
-                 [[r["id"], _sev(r["sev"]), _cut(r["title"], 36), _cut(r["asset"], 24),
-                   _cut(r["endpoint"] or "-", 28), _cut(_level_of(dict(r)), 12), r["count"],
-                   _cut(r["status"], 8)] for r in rows],
-                 [5, 8, 36, 24, 28, 12, 4, 8]))
-    print(f"\n共 {data['total']} 条（显示 {len(rows)}）　详情 {_c('kara list -i <ID>', '36')}"
-          f"　导出 {_c('kara list --csv out.csv', '36')}")
+    print(_table(["ID", "严重度", "存活", "标题", "资产", "端点", "级别", "次数", "状态"],
+                 [[r["id"], _sev(r["sev"]), _live(vfy.liveness_of(r)), _cut(r["title"], 36),
+                   _cut(r["asset"], 24), _cut(r["endpoint"] or "-", 28),
+                   _cut(_level_of(dict(r)), 12), r["count"], _cut(r["status"], 8)] for r in rows],
+                 [5, 8, 12, 36, 24, 28, 12, 4, 8]))
+    tail = (f"\n共 {data['total']} 条（显示 {len(rows)}）　详情 {_c('kara list -i <ID>', '36')}"
+            f"　导出 {_c('kara list --csv out.csv', '36')}")
+    if liveness == "UNVERIFIED":
+        tail += f"\n复验这批：{_c('kara verify --liveness unverified', '36')}"
+    print(tail)
     return 0
 
 
@@ -426,7 +488,10 @@ def _show_one(ctx: Ctx, row_id: int) -> int:
     print(f"  资产　　{r.get('asset') or '-'}　端口 {r.get('port') or '-'}　IP {r.get('ip') or '-'}")
     print(f"  端点　　{r.get('endpoint') or '-'}")
     print(f"  来源　　{r.get('sources') or '-'}　次数 {r.get('count')}　状态 {r.get('status')}")
-    print(f"  复验　　{r.get('verify_state') or '未复验'} {r.get('verify_note') or ''}")
+    live = vfy.liveness_of(r)
+    sym = vfy.LIVENESS_SYMBOLS[live]
+    print(f"  复验　　{_c(sym, LIVE_COLOR[live])} {live} · "
+          f"{r.get('verify_state') or '未复验'} {r.get('verify_note') or ''}")
     print(f"  时间　　{r.get('first_seen')} → {r.get('last_seen')}")
     if r.get("evidence"):
         print(f"  判据　　{_cut(r['evidence'], 400)}")
@@ -457,12 +522,17 @@ def _target_of(row: Dict[str, Any]) -> str:
 
 
 def cmd_verify(ctx: Ctx, args: argparse.Namespace) -> int:
+    try:
+        liveness = _norm_liveness(getattr(args, "liveness", ""))
+    except ValueError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 2
     if args.ids:
         ids = [int(x) for x in args.ids.replace(",", " ").split() if x.strip().isdigit()]
         rows = [dict(r) for r in ctx.store.findings_by_ids(ids)]
     else:
         rows = [dict(r) for r in ctx.store.findings(sev=args.sev, status=args.status,
-                                                   limit=args.limit)["rows"]]
+                                                   limit=args.limit, liveness=liveness)["rows"]]
     if not rows:
         print("没有要复验的条目。")
         return 0
@@ -582,6 +652,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--assets", action="store_true", help="看资产（主机/端口/指纹）")
     p.add_argument("--sev", default="", choices=["", "critical", "high", "medium", "low", "info"])
     p.add_argument("--status", default="", help="待验证 / 已确认 / 误报 / 已修复 / 已忽略")
+    p.add_argument("--liveness", default="", metavar="STATE",
+                   help="存活状态：alive / dead / unverified / unknown / na")
     p.add_argument("--q", default="", help="关键词")
     p.add_argument("--limit", type=int, default=50)
     p.add_argument("--csv", default="", help="导出 CSV 到该文件")
@@ -593,6 +665,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--target", action="append", default=[], help="仅 --deep：直接指定目标")
     p.add_argument("--sev", default="", choices=["", "critical", "high", "medium", "low", "info"])
     p.add_argument("--status", default="")
+    p.add_argument("--liveness", default="", metavar="STATE",
+                   help="按存活状态挑命中：alive / dead / unverified / unknown / na（--ids 优先）")
     p.add_argument("--limit", type=int, default=50)
     p.add_argument("--deep", action="store_true", help="深度验证（会真发请求）")
     p.add_argument("--dry-run", action="store_true", help="仅 --deep：只列目标，不发请求")

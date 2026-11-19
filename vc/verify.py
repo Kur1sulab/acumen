@@ -82,6 +82,45 @@ MODE_KIND = {
 STILL, GONE, UNKNOWN, NA = "仍存在", "已消失", "无法判定", "不可复验"
 VERIFY_STATES = (STILL, GONE, UNKNOWN, NA)
 
+# —— 存活状态（CLI list 的「现在还活着吗」维度）——
+# 唯一真相源是 set_verify 写回的 verify_state；这里只做翻译，不造第二套判定。
+# 「无法判定 / 不可复验」不并进 UNVERIFIED：前者是「复验过但没结论」，后者是
+# 「没有可回访的目标」。并进去会让「从没复验过」变成谎话，待办积压也永远清不完。
+LIVENESS_STATES = {"ALIVE": STILL, "DEAD": GONE, "UNVERIFIED": "",
+                   "UNKNOWN": UNKNOWN, "NA": NA}
+LIVENESS_TOKENS = tuple(LIVENESS_STATES)
+LIVENESS_LABELS = {"ALIVE": "存活", "DEAD": "已死", "UNVERIFIED": "未复验",
+                   "UNKNOWN": "无法判定", "NA": "不可复验"}
+# 符号 + 文字是第一载体，颜色只是辅助（黑白灰为主，色只点单个字符）：
+# ● 实心=活着　○ 空心=已消失　— 没答案=从没复验　? 复验过但没结论　∅ 没有可回访的目标
+LIVENESS_SYMBOLS = {"ALIVE": "●", "DEAD": "○", "UNVERIFIED": "—",
+                    "UNKNOWN": "?", "NA": "∅"}
+_STATE_TO_LIVENESS = {v: k for k, v in LIVENESS_STATES.items()}
+
+
+def liveness_of(row: Any) -> str:
+    """从一条命中推导存活状态。空结论 = 从没复验过（UNVERIFIED）。
+
+    认不出的结论字符串也归 UNVERIFIED：宁可当成「还没复验」再去跑一遍，
+    也不猜它活着或死了——与复验本身「宁可说不知道」的口径一致。
+    入参兼容 dict 与 sqlite3.Row（后者没有 .get，只能下标取）。
+    """
+    try:
+        state = row["verify_state"]
+    except (KeyError, IndexError):
+        state = ""
+    return _STATE_TO_LIVENESS.get(str(state or "").strip(), "UNVERIFIED")
+
+
+def liveness_summary(by_verify: List[Dict[str, Any]]) -> Dict[str, int]:
+    """把 verify_stats() 的分组计数聚成五桶；各桶之和恒等于命中总数。"""
+    out = {t: 0 for t in LIVENESS_TOKENS}
+    for r in by_verify or []:
+        state = str(r.get("verify_state") or "").strip()
+        out[_STATE_TO_LIVENESS.get(state, "UNVERIFIED")] += int(r.get("n") or 0)
+    return out
+
+
 MAX_BATCH = 60          # 一次最多复验多少条：重跑引擎是要花时间的，别让一个按钮把机器按住
 DEFAULT_TIMEOUT = 300   # 单组（一个模式 × 一个目标）超时
 
