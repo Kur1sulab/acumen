@@ -15,10 +15,24 @@
 判定只有三种，宁可说不知道也不猜
     仍存在    重跑成功，同一条命中再次出现
     已消失    重跑成功、这一类检查确实跑完了，命中没有再次出现
-    无法判定  引擎不在 / 超时 / 退出码非 0 / 产物认不出 —— 一律不下结论
+    无法判定  引擎不在 / 超时 / 退出码非 0 / 产物认不出 / 产物证明不了真测到了目标
+              —— 一律不下结论
 
 「不可复验」是第四种，给的不是引擎产物的条目（离线报告 MD、nuclei、nessus…）：
     它们没有可回访的目标，写「已消失」就是编造。宁可显示不可复验。
+
+覆盖全部产出漏洞判定的原生模式（来源标签带冒号后缀的，查表前先剥掉）：
+    sweep-paths / sweep-api / sweep-evidence / sweep-jsintel /
+    sweep-secheaders / sweep-webfiles / sweep-sslchain（baseline 三检查）、
+    sweep-strike:<check>（深度验证）/ sweep-brute:<svc>（弱口令）/
+    sweep-cve:<CVE号>（离线 CVE）。
+「真测到了目标」的证据各模式形状不同，_reach / _reach_brute 分别认：
+    paths/api 的 baseline/all、jsintel 的 page_status；
+    strike 的 coverage（要有开放端口且至少一项后续检查 ok——0 开放端口分不清
+    主机挂了还是服务全停，全 skip 是没测，都不许下「已消失」）；
+    brute 的 skipped（全部没测成＝拨号失败/锁定，不是「没弱口令」）；
+    cve 连不上时引擎 exit 1 不落产物；落了产物但产品指纹为空（可能是错误页）
+    同样不下结论。
 
 引擎产物落在 <cwd>/out/<host>/*.json（引擎没有 --out 参数），
 所以每次复验都用一个临时目录做 cwd，跑完即弃，不污染工作区。
@@ -40,6 +54,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import parsers_sweep as ps
 
 # 来源标签 → 引擎子命令。只有本机引擎跑出来的条目才谈得上复验。
+# strike/brute/cve 的来源带冒号后缀（check 名/服务名/CVE 号），查表前剥掉。
 SOURCE_MODE = {
     "sweep-paths": "paths",
     "sweep-api": "api",
@@ -47,6 +62,10 @@ SOURCE_MODE = {
     "sweep-jsintel": "jsintel",
     "sweep-secheaders": "baseline",
     "sweep-webfiles": "baseline",
+    "sweep-sslchain": "baseline",
+    "sweep-strike": "strike",
+    "sweep-brute": "brute",
+    "sweep-cve": "cve",
 }
 
 # 模式 → 产物里应该认得出的结果类型。跑完却没认到这一类结果 = 这次复验不算数。
@@ -55,6 +74,9 @@ MODE_KIND = {
     "api": "sweep_api",
     "jsintel": "sweep_jsintel",
     "baseline": "sweep_baseline",
+    "strike": "sweep_strike",
+    "brute": "sweep_brute",
+    "cve": "sweep_cve",
 }
 
 STILL, GONE, UNKNOWN, NA = "仍存在", "已消失", "无法判定", "不可复验"
@@ -65,6 +87,18 @@ DEFAULT_TIMEOUT = 300   # 单组（一个模式 × 一个目标）超时
 
 _URL_HEAD = re.compile(r"^(https?)://([^/\s]+)", re.I)
 _HOSTPORT = re.compile(r"^([^:/\s]+)(?::(\d{1,5}))?$")
+# 裸 host:port 形状的端点：strike 服务级命中（redis 未授权之类）的 target 落盘就是 h:p。
+_HOSTPORT_EP = re.compile(r"^(\[[0-9A-Fa-f:]+\]|[A-Za-z0-9._-]+):(\d{1,5})$")
+
+
+def bare_hostport(ep: str) -> str:
+    """端点是裸 host:port 就原样返回（端口必须合法），否则返回空串。
+
+    复验/深度验证要原样带着端口回访，不能裁成主机名再让引擎猜端口。
+    """
+    ep = (ep or "").strip()
+    m = _HOSTPORT_EP.match(ep)
+    return ep if m and 0 < int(m.group(2)) < 65536 else ""
 
 
 # ------------------------------------------------------------------ 目标还原
@@ -74,7 +108,8 @@ def base_url(row: Dict[str, Any]) -> str:
     """从一条命中还原出「当初扫的那个入口」。
 
     优先级：引擎自己记下的 base（扫描时写进库，scheme/host/port 一个不差）→
-    endpoint 自带的 scheme+host（引擎写的是 final_url）→ asset+port 拼一个。
+    endpoint 自带的 scheme+host（引擎写的是 final_url）→ 裸 host:port 端点
+    （strike 服务级命中，原样带端口回访）→ asset+port 拼一个。
     最后那条是猜的：http 目标猜成 https 会让引擎空手而归，
     所以这种「猜出来的入口」在 run_group 里要靠可达性判据兜底，不许直接下「已消失」。
     """
@@ -86,6 +121,9 @@ def base_url(row: Dict[str, Any]) -> str:
     m = _URL_HEAD.match(ep)
     if m:
         return f"{m.group(1).lower()}://{m.group(2).rstrip('/')}"
+    hp = bare_hostport(ep)
+    if hp:
+        return hp
     host = str(row.get("asset") or "").strip()
     if not host:
         return ""
@@ -119,7 +157,8 @@ def first_source(row: Dict[str, Any]) -> str:
 def plan_of(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """这条命中能不能复验？能的话怎么复验。返回 None = 不可复验。"""
     src = first_source(row)
-    mode = SOURCE_MODE.get(src)
+    # strike/brute/cve 的来源带冒号后缀（check 名/服务名/CVE 号），查表前剥掉
+    mode = SOURCE_MODE.get(src.split(":", 1)[0])
     if not mode:
         return None
     base = base_url(row)
@@ -128,11 +167,34 @@ def plan_of(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if mode == "baseline":
         check = src.split("-", 1)[1] if "-" in src else "secheaders"
         argv = ["baseline", "-d", domain_of(base) or base, "-u", base, "--checks", check]
+    elif mode == "strike":
+        # 深度验证重跑：base 可能是 http(s)://h:p，也可能是裸 h:p（服务级命中），
+        # strike 两种都吃（kind=any）。同一入口的多条命中共用一次重跑。
+        check = ""
+        argv = ["strike", "-t", base]
+    elif mode == "brute":
+        # 弱口令重跑是真握手（引擎自带额度/命中即停/锁定识别）。
+        # 服务名从来源后缀拿，端口从库里拿——当初怎么测的，现在就怎么测。
+        host = str(row.get("asset") or "").strip()
+        if not host or host in ("-", "unknown"):
+            return None
+        check = src.split(":", 1)[1] if ":" in src else ""
+        argv = ["brute", "-t", host]
+        if row.get("port"):
+            argv += ["-p", str(row["port"])]
+        if check:
+            argv += ["--service", check]
+    elif mode == "cve":
+        # CVE 匹配是对「当初那个 URL」的响应做版本指纹，端点带路径就原样回访，
+        # 不能裁到 host:port 再去请求首页——那会拿另一个页面的指纹下结论。
+        check = ""
+        ep = str(row.get("endpoint") or "").strip()
+        argv = ["cve", "-u", ep if _URL_HEAD.match(ep) else base]
     else:
+        check = ""
         argv = [mode, "-u", base]
     return {"mode": mode, "base": base, "src": src, "argv": argv,
-            "check": src.split("-", 1)[1] if "-" in src else "",
-            "kind": MODE_KIND.get(mode, "")}
+            "check": check, "kind": MODE_KIND.get(mode, "")}
 
 
 def ident(title: Any) -> str:
@@ -153,6 +215,12 @@ def repro_of(row: Dict[str, Any]) -> str:
     saved = str(row.get("repro") or "").strip()
     if saved:
         return saved
+    # TLS 证书链的命中没有可 GET 的端点，给一条本地可跑的建链命令
+    p = plan_of(row)
+    if p and p["mode"] == "baseline" and p.get("check") == "sslchain":
+        host = domain_of(p["base"]) or str(row.get("asset") or "").split(":")[0]
+        if host:
+            return f"openssl s_client -connect {host}:443 -servername {host} </dev/null"
     ep = str(row.get("endpoint") or "").strip()
     if not ep:
         return ""
@@ -176,9 +244,9 @@ def enrich(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 # ------------------------------------------------------------------ 重跑与比对
 
-# 引擎自己会说「我到底连上目标没有」：paths 写 baseline，api 写每条的 error，jsintel 写 page_status。
-# 这三种都要读——不看这个，http 目标被当成 https 重跑会得到「空手而归」，
-# 然后顺理成章地报一个假的「已消失」。宁可说无法判定。
+# 引擎自己会说「我到底连上目标没有」：paths 写 baseline，api 写每条的 error，jsintel 写 page_status，
+# strike 写 coverage，cve 写 products。这些都要读——不看这个，http 目标被当成 https 重跑
+# 会得到「空手而归」，然后顺理成章地报一个假的「已消失」。宁可说无法判定。
 def _reach(doc: Dict[str, Any]) -> Optional[bool]:
     """这个产物能不能证明目标真被访问到了。True 能 / False 明确没连上 / None 说不准。"""
     bl = doc.get("baseline")
@@ -194,7 +262,44 @@ def _reach(doc: Dict[str, Any]) -> Optional[bool]:
         return True
     if "page_status" in doc:
         return bool(doc.get("page_status")) and not doc.get("error")
+    # strike：coverage 是验证内核自己记的「测了什么」。要有开放端口、且至少一项
+    # 后续检查真跑完（ok）才许下结论：0 开放端口分不清「主机挂了」还是「服务全停」，
+    # 全 skip 是根本没测——两种都不许写成「已消失」。
+    if "findings" in doc and isinstance(doc.get("coverage"), list):
+        cov = [c for c in doc["coverage"] if isinstance(c, dict)]
+        ports_open = any(c.get("item") == "port-scan" and c.get("state") == "ok"
+                         and _cov_count(c) > 0 for c in cov)
+        checked = any(c.get("item") != "port-scan" and c.get("state") == "ok" for c in cov)
+        return True if (ports_open and checked) else False
+    # cve：请求完成才落产物，但 4xx/5xx 错误页也算「完成」。指纹到产品 = 目标真在
+    # 提供服务；指纹为空可能是错误页，分不清「产品没了」还是「页面坏了」→ 不下结论。
+    if "products" in doc and "matches" in doc:
+        prods = doc.get("products")
+        return True if isinstance(prods, list) and prods else False
     return None
+
+
+def _cov_count(c: Dict[str, Any]) -> int:
+    try:
+        return int(c.get("count") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _reach_brute(rows: List[Any]) -> Optional[bool]:
+    """brute.json 是数组：每个端口一条握手记录。
+
+    有命中 = 真连上了；握手完整跑完没命中 = 口令不再有效（可以下「已消失」）；
+    全部 skipped（拨号失败/锁定/协议错误）= 没测成，不是「没弱口令」——不下结论。
+    """
+    rs = [x for x in rows if isinstance(x, dict)]
+    if not rs:
+        return None
+    if any(x.get("found") for x in rs):
+        return True
+    if all(str(x.get("skipped") or "") for x in rs):
+        return False
+    return True
 
 
 def _collect(root: str) -> Tuple[set, List[Dict[str, Any]], str]:
@@ -223,7 +328,12 @@ def _collect(root: str) -> Tuple[set, List[Dict[str, Any]], str]:
             kind = ps.detect(obj)
             if kind:
                 kinds.add(kind)
-            one = _reach(obj) if isinstance(obj, dict) else None
+            if isinstance(obj, dict):
+                one = _reach(obj)
+            elif kind == "sweep_brute":
+                one = _reach_brute(obj)
+            else:
+                one = None
             # 只要有一份产物能证明连上了，就当连上了（不同模式各写各的）
             if one is True:
                 reach = True
@@ -235,7 +345,7 @@ def _collect(root: str) -> Tuple[set, List[Dict[str, Any]], str]:
     if not files:
         return kinds, items, "产物目录是空的"
     if reach is False:
-        return kinds, items, "引擎没连上目标（产物里全是失败记录），这次重跑不作数"
+        return kinds, items, "引擎产物证明不了这次真测到了目标（连不上 / 检查全跳过 / 没指纹），这次重跑不作数"
     return kinds, items, ""
 
 

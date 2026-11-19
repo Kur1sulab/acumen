@@ -68,6 +68,7 @@ kara verify --deep --sev high         # 对已有命中真打一轮
 - **去重合并**：键 `sha1(资产|标题|端点|参数)`。同一漏洞被多份产物报到不新增条目，次数 +1、来源取并集、严重度取最高、首次发现取最早。
 - **分级判据**：路径可达 ≠ 高危（凭据 / 源码 / 配置 / 备份 / 运维端点才 high）；JS 敏感串二次判定。
 - **复验**：按当初发现它的同一个模式重跑，结论分「仍存在 / 已消失 / 无法判定 / 不可复验」——**连不上目标不算已消失**。
+  覆盖全部产出漏洞判定的原生模式：paths / api / jsintel / baseline 三检查（含 TLS 证书链）/ strike / brute / cve。
 - **吃别家产物**：nuclei / xray / nmap / nessus / yakit / CSV / MD 表格 / 原始 HTTP 报文丢进收件箱，自动归一化进同一张表。
 
 ## 安装与引擎
@@ -104,7 +105,7 @@ vc/parsers_sweep.py  引擎原生产物解析（strike/paths/api/ports/jsintel/b
 vc/store.py          SQLite：去重合并 / 筛选 / 状态 / 复验结论 / 导出
 vc/ingest.py         收件箱遍历、内容指纹增量
 vc/verify.py         复验：按原模式重跑、三态判定（连不上 ≠ 已消失）
-tests/               129 个单测
+tests/               156 个单测
 ```
 
 ```bash

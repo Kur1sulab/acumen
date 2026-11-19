@@ -445,6 +445,10 @@ def _target_of(row: Dict[str, Any]) -> str:
         u = urllib.parse.urlsplit(ep)
         if u.hostname:
             return f"{u.scheme}://{u.hostname}" + (f":{u.port}" if u.port else "")
+    # strike 服务级命中的端点是裸 host:port：原样带端口回访（strike 吃 kind=any）
+    hp = vfy.bare_hostport(ep)
+    if hp:
+        return hp
     asset = str(row.get("asset") or "").strip()
     if asset and asset not in ("-", "unknown"):
         port = row.get("port")
