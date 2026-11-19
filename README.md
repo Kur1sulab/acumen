@@ -105,7 +105,7 @@ vc/parsers_sweep.py  引擎原生产物解析（strike/paths/api/ports/jsintel/b
 vc/store.py          SQLite：去重合并 / 筛选 / 状态 / 复验结论 / 导出
 vc/ingest.py         收件箱遍历、内容指纹增量
 vc/verify.py         复验：按原模式重跑、三态判定（连不上 ≠ 已消失）
-tests/               156 个单测
+tests/               163 个单测
 ```
 
 ```bash

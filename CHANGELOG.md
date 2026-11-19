@@ -3,6 +3,30 @@
 版本号按 [语义化版本](https://semver.org/lang/zh-CN/)：修 bug 走 patch，加能力走 minor，
 输出格式或数据库结构不兼容才走 major。
 
+## 1.9.3 — 2026-11-19
+
+### 修复 · scan 的 `--timeout` 不再依赖引擎「吐输出」才生效
+
+`vc/scans.py` 的 `_run_target` 原先把 deadline 检查挂在 `for line in proc.stdout`
+循环体里：只有读到新的一行输出，才顺手看一眼是否超时。可引擎卡死时往往一行日志
+都不吐——内网 / 断网现场，朝黑洞主机的 TCP connect、卡住的 DNS 就是这种形状。
+于是读循环永远等不到下一行，`--timeout` 永不触发，任务无限挂起只能 Ctrl+C，
+帮助里「单目标超时秒数」的承诺对最常见的失败形状形同虚设。
+（`kara verify` 的重跑走 `subprocess.run(timeout=…)`，从来不受影响；只有扫描执行路径有这个洞。）
+
+- `vc/scans.py`：超时改由独立看门狗线程执行——到点进程还活着就标记并整组
+  TERM → KILL，与有没有输出无关；读循环结束后按 `timed_out` 标记定状态。
+  正常跑完由 `done_evt` 唤退看门狗、不碰进程；deadline 前手动停止仍是
+  `stopped`，看门狗不抢 stop 的活。
+- `tests/test_scan_timeout.py`（新，4 用例）：完全静默的引擎到点必须被杀并标
+  `timeout`；吐一行后卡死同样要超时；时限内跑完的静默引擎不许被误杀误标；
+  deadline 前手动停止得 `stopped`。修复前两条以 `'ok' != 'timeout'` 失败。
+- 真机验证：静默假引擎（sleep 60、零输出），
+  `kara --timeout 30 scan -t 10.255.255.1 -m portscan` 在 30.0s 被准时终止
+  （`— TIMEOUT 用时 30.0s · 超过 30s 超时被终止`）；修复前同形状探针
+  （2s 超时、引擎 sleep 6）睡满全程还报 `ok`。
+- 163 个单测全绿；`tools/check_offline.py` / `check_zero_deps.py` 通过。
+
 ## 1.9.2 — 2026-11-19
 
 ### 修复 · brute 模式的 `--ports` / `--service` 被静默丢弃

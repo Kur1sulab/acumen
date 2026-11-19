@@ -520,12 +520,15 @@ class ScanManager:
         self._log(job_id, target, f"$ {' '.join(argv[3:])}   (cwd={job_dir})")
 
         stop_evt = threading.Event()
+        done_evt = threading.Event()
+        timed_out = threading.Event()
         tail = threading.Thread(target=self._tail_progress, args=(run_id, progress_path, stop_evt),
                                 daemon=True)
         tail.start()
 
         status, code, err = "failed", None, ""
         proc = None
+        watchdog = None
         try:
             with open(log_path, "w", encoding="utf-8") as logf:
                 proc = subprocess.Popen(
@@ -534,32 +537,46 @@ class ScanManager:
                     bufsize=1, start_new_session=True)
                 with self._lock:
                     self._live[run_id]["proc"] = proc
+                # 超时必须由独立看门狗执行，不能挂在读输出上：早先 deadline 检查写在
+                # `for line in proc.stdout` 循环体里，引擎卡死时往往一行都不吐
+                # （内网黑洞主机的 TCP connect / DNS 挂起是常态），读循环永远等不到
+                # 下一行，--timeout 永不触发，任务无限挂起只能 Ctrl+C。
                 deadline = time.time() + tmo
+
+                def _watchdog():
+                    if done_evt.wait(max(0.0, deadline - time.time())):
+                        return                      # 正常跑完，别碰进程
+                    if proc.poll() is None:
+                        timed_out.set()
+                        self._kill(proc)
+
+                watchdog = threading.Thread(target=_watchdog, daemon=True)
+                watchdog.start()
                 for line in proc.stdout:
                     line = line.rstrip("\n")
                     if line:
                         logf.write(line + "\n")
                         logf.flush()
                         self._log(job_id, target, line)
-                    if time.time() > deadline:
-                        self._kill(proc)
-                        status, err = "timeout", f"超过 {tmo}s 超时被终止"
-                        break
                 code = proc.wait(timeout=30)
-                if status != "timeout":
-                    if job_id in self._stopping:
-                        status = "stopped"
-                    elif code == 0:
-                        status = "ok"
-                    else:
-                        status, err = "failed", f"引擎退出码 {code}"
+                if timed_out.is_set():
+                    status, err = "timeout", f"超过 {tmo}s 超时被终止"
+                elif job_id in self._stopping:
+                    status = "stopped"
+                elif code == 0:
+                    status = "ok"
+                else:
+                    status, err = "failed", f"引擎退出码 {code}"
         except FileNotFoundError:
             status, err = "failed", "引擎二进制不见了：" + self.engine
         except Exception as e:
             status, err = "failed", f"启动失败：{e}"
         finally:
             stop_evt.set()
+            done_evt.set()
             tail.join(timeout=2)
+            if watchdog:
+                watchdog.join(timeout=4)
             self._drain_progress(run_id, progress_path, 0)   # 兜底：全量补一次（幂等）
             if proc and proc.poll() is None:
                 self._kill(proc)
