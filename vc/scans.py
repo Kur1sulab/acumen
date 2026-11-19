@@ -504,7 +504,10 @@ class ScanManager:
         progress_path = os.path.join(job_dir, "progress", slug + ".jsonl")
         log_path = os.path.join(job_dir, "logs", slug + ".log")
         argv = [self.engine, "--progress-file", progress_path, spec["sub"], spec["flag"], target]
-        if spec["sub"] == "strike" and self.mode_args:
+        # mode_args 只由 CLI 为 strike / brute 填（见 cli._mode_args），其它模式恒为空。
+        # 早先这里写死 spec["sub"] == "strike"，于是 `kara scan -m brute -p 6379 --service redis`
+        # 的参数被静默丢掉——命令看着跑了，其实按默认端口表在扫，最容易误判成「没问题」。
+        if self.mode_args:
             argv += self.mode_args
 
         with self._lock:

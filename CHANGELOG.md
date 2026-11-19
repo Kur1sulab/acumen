@@ -3,6 +3,26 @@
 版本号按 [语义化版本](https://semver.org/lang/zh-CN/)：修 bug 走 patch，加能力走 minor，
 输出格式或数据库结构不兼容才走 major。
 
+## 1.9.2 — 2026-11-19
+
+### 修复 · brute 模式的 `--ports` / `--service` 被静默丢弃
+
+`kara scan -m brute --ports 6379 --service redis`（README 里就是这么写的）实际
+根本没把这两个参数交给引擎：`vc/scans.py` 的 `_run_target` 只在
+`spec["sub"] == "strike"` 时追加 `mode_args`，brute 落到了 else 分支。
+后果不是报错，而是引擎按自己的默认端口表自动识别服务——跑完没命中，人会
+当成「目标没问题」，比报错更贵。
+
+- `vc/scans.py`：改成只要 `self.mode_args` 非空就追加（CLI 只给 strike / brute
+  填这两组参数，其余模式恒为空），并在注释里写明踩过的坑。
+- `tests/test_brute_args.py`（新，3 用例）：`_mode_args` 在 brute 下给的是
+  `-p/--service`、在 strike 下是 `--ports`；假引擎断言 argv 里三样齐全且目标
+  没被挤掉；paths 这类模式 argv 不被污染。
+- 真机验证：本机起 mock redis（16399，PING 直接可用），
+  `kara scan -m brute -t 127.0.0.1 --ports 16399 --service redis` 命中
+  `redis://127.0.0.1:16399`「Redis 未设口令」，入账 critical 1 条——
+  修复前这个端口不在默认表里，必然漏。
+
 ## 1.9.1 — 2026-11-19
 
 ### 修复 · 复验覆盖：strike / brute / cve / sslchain 的命中不再被误标「不可复验」
