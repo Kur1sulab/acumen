@@ -257,7 +257,7 @@ class TestOutputHygiene(unittest.TestCase):
     def test_alignment_non_tty(self):
         _, out, _ = run("--db", self.db, "list")
         widths = {cli._w(l) for l in self._table_lines(out)}
-        self.assertEqual(widths, {153})   # 5+8+12+36+24+28+12+4+8 + 8×2 间隔
+        self.assertEqual(widths, {153})   # 5+8+12+14+32+20+20+12+4+8 + 9×2 间隔（WAF 列占 14）
 
     def test_alignment_tty(self):
         with mock.patch.object(cli, "_tty", return_value=True):

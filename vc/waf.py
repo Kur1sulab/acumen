@@ -1,0 +1,617 @@
+"""WAF 指纹前置：先把「被拦」从「不存在」里摘出来。
+
+为什么这件事必须前置（总纲 4.1 P0）：漏扫最严重的系统性错误是「被拦当不存在」。
+WAF 把 403 糊到所有路径上 → 引擎的软 404 基线把这一批 403 当 catch-all 过滤掉 →
+产物里 alive=[]、报告写「没有存活路径」；复验时同一批 403 找不到原命中，又顺势
+写成「已消失/误报」。两次都在把「防护生效」记成「漏洞不存在」，漏报就是这么进报告的。
+
+所以判定拆成四态（任务要的三态 + 一个正常态），不再用「命中/不命中」二元：
+    blocked   被 WAF 拦（403/406/412、拦截页特征、引擎的 uniform403 基线）
+    absent    真不存在（404/410 且没有任何拦截特征）
+    unknown   不确定（5xx、挑战页、软 404 catch-all、无响应）
+    present   正常响应（2xx/3xx）——它既不是「拦」也不是「不存在」；不单列出来，
+              就会被人读成「没拦 = 没东西」，等于换了个说法继续漏报。
+
+三条纪律：
+  1. WAF 存在 ≠ 被拦。Cloudflare 给每个响应挂 cf-ray，那是「有 CDN」，不是「拦了你」。
+     判 blocked 只认拦截证据（状态码 / 拦截页 / 引擎 uniform403 基线），不认厂商命中。
+  2. 认不出厂商也必须能判「被拦」：403 + 通用拦截词 → blocked，waf 名留空。
+     只认厂商清单会漏掉一堆自研 WAF，那不叫三态，那叫厂商匹配。
+  3. 这里不联网。响应数据要么由调用方传入，要么从引擎产物里读（baseline.kind/status、
+     notes[].verdict、secheaders 的 data.waf、evidence 的 server）——
+     Python 侧自己建连在 tools/check_offline.py 里是被禁的，扫描由引擎子进程做。
+"""
+
+from __future__ import annotations
+
+import json
+import pathlib
+from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
+
+# ---------------------------------------------------------------- 四态常量
+
+PRESENT, BLOCKED, ABSENT, UNKNOWN = "present", "blocked", "absent", "unknown"
+
+# 合并口径（行级）：坏消息优先。被拦的证据必须压过 404 的证据，
+# 否则一条产物说「被拦」、另一条说「404」，合并出来的结论又会滑回「不存在」。
+STATE_RANK = {BLOCKED: 3, UNKNOWN: 2, PRESENT: 1, ABSENT: 0}
+STATES = (BLOCKED, UNKNOWN, PRESENT, ABSENT)
+
+STATE_LABELS = {
+    BLOCKED: "被 WAF 拦",
+    ABSENT: "真不存在",
+    UNKNOWN: "不确定",
+    PRESENT: "正常响应",
+}
+# 表格里一列只放得下两个字，badge 只做视觉标记，长结论看 label
+STATE_BADGES = {BLOCKED: "拦", ABSENT: "无", UNKNOWN: "?", PRESENT: "在"}
+
+# 中文/英文/数字写法都收：CLI 上人手敲的是 blocked，报告里写的是「被拦」
+STATE_ALIASES = {
+    "blocked": BLOCKED, "block": BLOCKED, "waf": BLOCKED, "拦": BLOCKED, "被拦": BLOCKED,
+    "被waf拦": BLOCKED, "被 waf 拦": BLOCKED, "拦截": BLOCKED,
+    "absent": ABSENT, "none": ABSENT, "404": ABSENT, "不存在": ABSENT, "真不存在": ABSENT, "无": ABSENT,
+    "unknown": UNKNOWN, "?": UNKNOWN, "不确定": UNKNOWN, "存疑": UNKNOWN,
+    "present": PRESENT, "ok": PRESENT, "存在": PRESENT, "正常": PRESENT, "在": PRESENT,
+}
+
+BODY_SCAN = 64 * 1024   # 只扫正文前 64KB：拦截页的特征都在头部，全文扫只是浪费
+
+# 拦截状态码。403 最常见；406/412 是 ModSecurity / 主动防护的经典码；418 是部分
+# 国产 WAF 的恶趣味；451 是合规封锁（也是「不是不存在」）。
+BLOCK_STATUS = frozenset({403, 406, 412, 418, 451})
+
+# ---------------------------------------------------------------- 指纹表
+#
+# 每条 = 厂商 + 四类证据（响应头名 / Server 值 / Cookie 名 / 正文子串）。
+# 头名与 Cookie 名大小写无关（norm_headers 统一小写），正文子串一律小写比较。
+# weight 只用来在多个厂商同时命中时排序（CDN + WAF 套着用时取强证据那个）。
+
+SIGNATURES: Tuple[Dict[str, Any], ...] = (
+    {
+        "vendor": "Cloudflare",
+        "weight": 9,
+        "headers": ("cf-ray", "cf-cache-status", "cf-request-id", "cf-mitigated"),
+        "server": ("cloudflare",),
+        "cookies": ("__cfduid", "cf_clearance", "__cf_bm", "__cflb", "cf_use_ob", "cf_ob_info"),
+        "body": ("attention required! | cloudflare", "ray id", "__cf_chl",
+                 "cf-browser-verification", "cloudflare ray id"),
+    },
+    {
+        "vendor": "阿里云盾",
+        "weight": 9,
+        "headers": ("eagleid", "ali-swift-global-savetime", "x-swift-savetime",
+                    "ali-swift-cachetime", "x-acs-trace-id"),
+        "server": ("aliyun", "tengine"),
+        "cookies": ("acw_tc", "acw_sc__v2", "aliyungf_tc", "ssxmod_itna", "acw_sc__v2"),
+        "body": ("很抱歉，由于您访问的url有可能对网站造成安全威胁", "您的请求被拦截",
+                 "error_405", "阿里云", "aliyun waf"),
+    },
+    {
+        "vendor": "腾讯云 WAF",
+        "weight": 9,
+        "headers": ("x-waf-uuid", "x-waf-request-id", "x-tencent-waf", "x-nws-log-uuid"),
+        "server": ("tencent-waf", "tencentcloud-waf"),
+        "cookies": ("waf_session", "wafsid", "tencent_waf"),
+        "body": ("腾讯云web应用防火墙", "waf.tencentcloud.com", "您的访问请求被拦截",
+                 "tencent waf", "腾讯云 waf"),
+    },
+    {
+        "vendor": "长亭雷池",
+        "weight": 9,
+        "headers": ("x-safeline-block", "x-safeline-waf", "x-safe-line", "x-safeline-request-id"),
+        "server": ("safeline", "chaitin"),
+        "cookies": ("safeline_session", "safeline_waf"),
+        "body": ("safeline", "雷池", "长亭科技", "chaitin"),
+    },
+    {
+        "vendor": "安全狗",
+        "weight": 9,
+        "headers": ("x-safedog-block", "x-safedog", "x-safedog-flow"),
+        "server": ("safedog",),
+        "cookies": ("safedog-flow-item", "safedog", "safedog_session"),
+        "body": ("安全狗", "safedog", "www.safedog.cn"),
+    },
+    {
+        "vendor": "创宇盾",
+        "weight": 9,
+        "headers": ("x-yunaq-block", "x-yunsuo-block", "x-yunaq-request-id"),
+        "server": ("yunaq", "yunsuo"),
+        "cookies": ("yunsuo_session_verify", "yunsuo_session", "yunaq_session"),
+        "body": ("创宇盾", "知道创宇", "yunsuo", "yunaq"),
+    },
+    {
+        "vendor": "ModSecurity",
+        "weight": 9,
+        "headers": ("x-mod-security", "x-modsec", "modsecurity-action"),
+        "server": ("mod_security", "modsecurity", "mod-security"),
+        "cookies": (),
+        "body": ("mod_security", "modsecurity", "this error was generated by mod_security",
+                 "not acceptable!"),
+    },
+    {
+        "vendor": "AWS WAF",
+        "weight": 9,
+        "headers": ("x-amzn-waf-action", "x-amzn-waf-error"),
+        "server": ("awselb", "aws-waf"),
+        "cookies": ("awsalb", "awsalbcors"),
+        "body": ("request blocked", "aws waf", "generated by cloudfront"),
+    },
+    {
+        "vendor": "F5 BIG-IP",
+        "weight": 9,
+        "headers": ("x-wa-info", "x-cnection", "x-f5-asm"),
+        "server": ("big-ip", "bigip", "f5 networks"),
+        "cookies": ("ts01", "tspd_101", "bigipserver", "f5_cspm", "ts_"),
+        "body": ("the requested url was rejected", "please consult with your administrator",
+                 "support id", "big-ip"),
+    },
+)
+
+# 通用拦截页特征（认不出厂商也要能判「被拦」——自研 WAF 的页面通常只有这些词）
+BLOCK_BODY = (
+    "请求被拦截", "访问被拦截", "已被拦截", "拦截页面", "网站防火墙", "云waf", "您的请求被安全",
+    "blocked by waf", "request blocked", "request rejected", "your request has been blocked",
+    "access denied by", "the requested url was rejected", "this error was generated by mod_security",
+    "not acceptable!", "attention required! | cloudflare", "sorry, you have been blocked",
+    "errors.edgesuite.net", "requested url was rejected",
+)
+
+# 挑战页：看起来是 200/503，拿到的却不是真实内容。归「不确定」——
+# 既不许当命中，也不许当不存在（这是三态里最容易被忽略的一格）。
+CHALLENGE_BODY = (
+    "just a moment", "checking your browser", "cf-browser-verification", "__cf_chl",
+    "enable javascript and cookies to continue", "challenge-platform",
+    "verifying you are human", "ddos protection by", "请完成验证", "人机验证", "滑动验证",
+    "安全验证", "访问验证", "五秒盾",
+)
+
+
+# ---------------------------------------------------------------- 小工具
+
+def norm_headers(headers: Any) -> Dict[str, str]:
+    """响应头 → 全小写键的扁平字典。
+
+    真实服务器的头名大小写随缘（CF-Ray / cf-ray / Cf-Ray 都见过），判据跟着大小写
+    跑就会时灵时不灵。这里统一压平：同名多值（set-cookie）用 ", " 拼起来。
+    """
+    out: Dict[str, str] = {}
+    if not headers:
+        return out
+    items: Iterable[Any]
+    if isinstance(headers, Mapping):
+        items = headers.items()
+    else:
+        try:
+            items = list(headers)
+        except TypeError:
+            return out
+    for pair in items:
+        try:
+            k, v = pair
+        except (TypeError, ValueError):
+            continue
+        key = str(k).strip().lower()
+        if not key:
+            continue
+        val = str(v)
+        out[key] = f"{out[key]}, {val}" if key in out else val
+    return out
+
+
+def _first_hit(haystack: str, needles: Sequence[str]) -> str:
+    for n in needles:
+        if n and n in haystack:
+            return n
+    return ""
+
+
+def _cookie_text(headers: Mapping[str, str], cookies: str = "") -> str:
+    """Cookie 名统一放一个串里比较：set-cookie 头的值里就有名，"名=值; 名=值" 形态。"""
+    return " ".join([headers.get("set-cookie", ""), headers.get("cookie", ""), cookies or ""]).lower()
+
+
+def identify(headers: Any = None, body: str = "", cookies: str = "") -> List[Dict[str, Any]]:
+    """哪些 WAF 的指纹出现在这个响应里。
+
+    返回 [{vendor, signal, weight}]，按 weight 降序。
+    注意：这里只回答「有谁在中间」，不回答「有没有拦我」——两个问题分开问，
+    否则 Cloudflare 的每个响应都会被判成「被拦」。
+    """
+    hs = norm_headers(headers)
+    text = (body or "")[:BODY_SCAN].lower()
+    ck = _cookie_text(hs, cookies)
+    found: List[Dict[str, Any]] = []
+    for sig in SIGNATURES:
+        best = ("", 0)
+        for h in sig["headers"]:
+            if h in hs:
+                best = (f"响应头 {h}", sig["weight"])
+                break
+        if not best[1]:
+            srv = hs.get("server", "").lower()
+            for word in sig["server"]:
+                if word and word in srv:
+                    best = (f"Server: {hs.get('server', '')[:40]}", sig["weight"] - 2)
+                    break
+        if not best[1]:
+            for word in sig["cookies"]:
+                if word and word in ck:
+                    best = (f"Cookie {word}", sig["weight"] - 1)
+                    break
+        if not best[1]:
+            for word in sig["body"]:
+                if word and word in text:
+                    best = (f"正文「{word}」", sig["weight"] - 3)
+                    break
+        if best[1]:
+            found.append({"vendor": sig["vendor"], "signal": best[0], "weight": best[1]})
+    found.sort(key=lambda x: -x["weight"])
+    return found
+
+
+def _v(state: str, names: List[Dict[str, Any]], reason: str, status: int = 0,
+       kind: str = "") -> Dict[str, Any]:
+    """统一结论形状。多一个字段不花钱，少一个字段调用方就得自己猜。"""
+    return {
+        "state": state,
+        "label": STATE_LABELS.get(state, state),
+        "badge": STATE_BADGES.get(state, "?"),
+        "waf": ", ".join(n["vendor"] for n in names),
+        "waf_names": [n["vendor"] for n in names],
+        "signals": [n["signal"] for n in names],
+        "status": int(status or 0),
+        "kind": kind or "",
+        "reason": reason,
+    }
+
+
+def _names_from_vendors(vendors: Iterable[str]) -> List[Dict[str, Any]]:
+    return [{"vendor": str(v), "signal": "引擎产物 data.waf", "weight": 9} for v in vendors if str(v).strip()]
+
+
+# ---------------------------------------------------------------- 单响应判定
+
+def classify(status: int = 0, headers: Any = None, body: str = "",
+             kind: str = "", verdict: str = "", error: str = "",
+             cookies: str = "") -> Dict[str, Any]:
+    """一个响应 → 四态。这是整个模块唯一的判定入口，别在调用方另写一套 if。
+
+    kind：引擎的站点基线形态（normal/soft404/uniform403/redirect/unknown）。
+    verdict：引擎行级判词（如「被拒绝（可能受保护/WAF）」）。
+    """
+    hs = norm_headers(headers)
+    text = (body or "")[:BODY_SCAN]
+    low = text.lower()
+    names = identify(hs, text, cookies)
+    kind = (kind or "").strip().lower()
+    verdict = str(verdict or "")
+    err = str(error or "").strip()
+    status = int(status or 0)
+
+    # 1) 引擎自己已经判过「整站 403」——这是最硬的站点级拦截证据，
+    #    比任何单条响应都可靠，优先采信。
+    if kind == "uniform403":
+        return _v(BLOCKED, names,
+                  "站点基线整体 403（uniform403）：全站被防护拦下，任何路径的 0 命中都不作数",
+                  status or 403, kind)
+
+    # 2) 挑战页：200/503 都可能，但拿到的不是真实内容 → 不确定。
+    #    放在状态码之前，因为挑战页最爱用 200。
+    if status < 400:
+        ch = _first_hit(low, CHALLENGE_BODY)
+        if ch:
+            return _v(UNKNOWN, names, f"挑战/人机校验页（「{ch}」）：响应不代表真实内容", status, kind)
+
+    # 3) 连不上 / 引擎报错 → 不确定（绝不算「不存在」）
+    if status == 0:
+        return _v(UNKNOWN, names, f"没有拿到响应{f'（{err}）' if err else ''}", 0, kind)
+
+    # 4) 5xx → 不确定。502/503 常是 WAF 后面的源站被打挂，也可能就是 WAF 自己的错误页。
+    if status >= 500:
+        return _v(UNKNOWN, names, f"服务端错误 {status}：这一格判不了", status, kind)
+
+    # 5) 拦截状态码
+    if status in BLOCK_STATUS:
+        who = f"（{names[0]['vendor']}）" if names else ""
+        return _v(BLOCKED, names, f"拦截状态码 {status}{who}", status, kind)
+    if status == 401:
+        return _v(BLOCKED, names, "401 需要认证：资源存在但被挡在门外", status, kind)
+
+    # 6) 引擎行级判词
+    if "被拒绝" in verdict:
+        return _v(BLOCKED, names, f"引擎判定「{verdict}」", status, kind)
+
+    # 7) 拦截页特征：404/405/200 都可能是自定义拦截页（国产 WAF 很爱这么干）
+    blk = _first_hit(low, BLOCK_BODY)
+    if blk:
+        if status in (404, 410):
+            return _v(BLOCKED, names, f"404 带拦截页特征「{blk}」——不是不存在，是被拦后伪装的", status, kind)
+        if status >= 400 or status in (200, 405):
+            return _v(BLOCKED, names, f"拦截页特征「{blk}」（{status}）", status, kind)
+
+    # 8) 真不存在：只有「404/410 且一条拦截特征都没有」才敢这么说
+    if status in (404, 410):
+        return _v(ABSENT, names, f"{status} 且无任何拦截特征", status, kind)
+
+    # 9) 站点基线说不清（软 404 / 重定向 / 探针不足）→ 不确定
+    if kind in ("soft404", "redirect", "unknown"):
+        return _v(UNKNOWN, names, f"站点基线 {kind}：所有路径同形，分不清「不存在」和「拦」", status, kind)
+
+    if status == 429:
+        return _v(UNKNOWN, names, "限速 429：不是「不存在」，但也没拿到内容", status, kind)
+    if 200 <= status < 400:
+        return _v(PRESENT, names, "正常响应", status, kind)
+    return _v(UNKNOWN, names, f"状态码 {status} 不在判据内", status, kind)
+
+
+# ---------------------------------------------------------------- 产物判定
+
+def _doc_waf_names(doc: Mapping[str, Any]) -> List[str]:
+    """从产物里捞引擎已经认过的厂商（secheaders 把 data.waf 写进结果包络）。"""
+    out: List[str] = []
+    data = doc.get("data")
+    if not isinstance(data, dict):
+        data = {}
+    for src in (doc.get("waf"), data.get("waf")):
+        if isinstance(src, str):
+            out += [x.strip() for x in src.replace(";", ",").split(",") if x.strip()]
+        elif isinstance(src, (list, tuple)):
+            out += [str(x).strip() for x in src if str(x).strip()]
+    return list(dict.fromkeys(out))
+
+
+def _rows_of(doc: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    """产物里所有「一行一个探测结果」的集合。不同模式的键名不一样，全收。"""
+    rows: List[Dict[str, Any]] = []
+    for key in ("alive", "notes", "all", "open", "routes", "findings"):
+        val = doc.get(key)
+        if isinstance(val, list):
+            rows += [r for r in val if isinstance(r, dict)]
+    return rows
+
+
+def classify_doc(doc: Any) -> Dict[str, Any]:
+    """一份引擎产物 → 四态。
+
+    产物里没有原始响应头和正文（只有引擎摘出来的判据），所以这里做两件事：
+      a) 用 baseline.kind/status + server + evidence 走一遍单响应判定；
+      b) 再看行级证据：notes 里一批 403/406/412 说明「这个站点在拦我」——
+         而 alive=[] 恰恰是漏报发生的地方，不能因为数组空就判「没有」。
+    """
+    if not isinstance(doc, Mapping):
+        return _v(UNKNOWN, [], "产物不是 JSON 对象，无法判定")
+
+    hs = norm_headers(doc.get("headers") or doc.get("response_headers") or {})
+    srv = str(doc.get("server") or "").strip()
+    if srv and "server" not in hs:
+        hs["server"] = srv          # 引擎把 Server 单独摘出来放 server 字段
+
+    bl = doc.get("baseline")
+    if not isinstance(bl, dict):
+        bl = {}
+    body = str(doc.get("body") or doc.get("snippet") or doc.get("evidence") or "")
+    status = int(bl.get("status") or doc.get("status") or doc.get("page_status") or 0)
+    kind = str(bl.get("kind") or "")
+    verdict = str(doc.get("verdict") or "")
+    v = classify(status=status, headers=hs, body=body, kind=kind, verdict=verdict,
+                 error=str(doc.get("error") or ""))
+
+    concl = doc.get("conclusion")
+    if v["state"] == UNKNOWN and not status and not bl and isinstance(concl, dict):
+        lvl = str(concl.get("level") or "").strip().lower()
+        if lvl in ("ok", "warn", "fail", "info") and not str(doc.get("error") or "").strip():
+            # baseline 三检查（secheaders/webfiles/sslchain）的产物没有 status 字段：
+            # 有 conclusion 就说明这一项真跑完了、拿到了响应，属于「正常响应」而不是「不确定」。
+            # 不认这一条的话，-m baseline 的每一轮都会被标成「不确定」，标签也就废了。
+            v = _v(PRESENT, [], f"基线检查已完成（conclusion={lvl}）", 0, "")
+
+    names = list(v["waf_names"]) + _doc_waf_names(doc)
+    if names:
+        names = list(dict.fromkeys(names))
+        merged = _names_from_vendors(names)
+        v = _v(v["state"], merged, v["reason"], v["status"], v["kind"])
+
+    rows = _rows_of(doc)
+    statuses = [int(r.get("status") or 0) for r in rows]
+    blocky = sorted({s for s in statuses if s in BLOCK_STATUS})
+    oks = [s for s in statuses if 200 <= s < 300]
+    verdicts = " ".join(str(r.get("verdict") or "") for r in rows)
+    if "被拒绝" in verdicts and not oks and v["state"] != BLOCKED:
+        return _v(BLOCKED, _names_from_vendors(names) if names else [],
+                  "行级判词「被拒绝」且本轮没有任何 2xx：站点在拦", v["status"], v["kind"])
+    if blocky and not oks and v["state"] != BLOCKED:
+        # 一条 2xx 都没有、却有一批 403/406/412 —— 这就是「全站被拦」的产物形态
+        return _v(BLOCKED, _names_from_vendors(names) if names else [],
+                  f"{len(blocky)} 种状态被拒（{blocky}）且本轮无 2xx：被拦，不是不存在",
+                  v["status"], v["kind"])
+    if blocky and oks and v["state"] == PRESENT:
+        v = dict(v)
+        v["reason"] = f"{v['reason']}；另有 {len(blocky)} 条探测被拒（{blocky}），部分路径受保护"
+    elif oks and v["state"] == ABSENT:
+        # 同一份产物里有 2xx：基线 404 只说明「随机路径不存在」，不等于整份产物是「不存在」。
+        # 不纠正的话，这批真命中会被打上 absent，正好踩中「被拦/无 → 不存在」的老坑。
+        reason = f"有 {len(oks)} 条 2xx 命中，站点正常响应"
+        if blocky:
+            reason += f"；另有 {len(blocky)} 条探测被拒（{blocky}），部分路径受保护"
+        v = _v(PRESENT, _names_from_vendors(names) if names else [], reason, oks[0], v["kind"])
+    return v
+
+
+def _netloc_of(value: str) -> str:
+    """从任意写法里抠出 host[:port]：'https://a.com:8443/x' → 'a.com:8443'。"""
+    s = str(value or "").strip().lower()
+    if "://" in s:
+        s = s.split("://", 1)[1]
+    return s.split("/")[0]
+
+
+def _mentions(doc: Mapping[str, Any], path: pathlib.Path, host: str) -> bool:
+    """这份产物是不是这个目标的。
+
+    引擎按 out/<host>/ 分目录写，但同一台机器上的多目标扫描会共用一个 out ——
+    只看目录名会在「同 IP 不同端口」时串味（127.0.0.1:8897 的产物被算进 :8898），
+    所以按 host[:port] 精确比，端口不同就是不同目标。
+    """
+    if not host:
+        return True
+    want = _netloc_of(host)
+    want_host, _, want_port = want.partition(":")
+    slug = want.replace(".", "_").replace(":", "_")
+    cands = [path.parent.name]
+    for key in ("base", "target", "url", "final_url", "host"):
+        cands.append(str(doc.get(key) or ""))
+    for r in _rows_of(doc)[:20]:
+        for key in ("final_url", "url", "host"):
+            cands.append(str(r.get(key) or ""))
+    for c in cands:
+        if not c.strip():
+            continue
+        nl = _netloc_of(c)
+        if nl == want:
+            return True
+        # 目标写了端口就必须连端口一起对上：同 IP 不同端口是两个服务
+        if want_port:
+            if slug and slug in c.lower():
+                return True
+            continue
+        if nl.split(":")[0] == want_host:
+            return True
+    return False
+
+
+def classify_tree(root: str, host: str = "") -> Dict[str, Any]:
+    """一个目标的所有产物 → 一个站点结论。跑在引擎之后、入账之前。"""
+    rootp = pathlib.Path(str(root or ""))
+    if not rootp.is_dir():
+        return _v(UNKNOWN, [], "产物目录不存在，WAF 判定没有依据")
+    got: List[Dict[str, Any]] = []
+    seen = 0
+    for p in sorted(rootp.rglob("*.json")):
+        try:
+            doc = json.loads(p.read_text("utf-8", "ignore"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(doc, dict) or not _mentions(doc, p, host):
+            continue
+        seen += 1
+        got.append(classify_doc(doc))
+    if not got:
+        return _v(UNKNOWN, [], "没有该目标的产物，WAF 判定没有依据")
+    v = merge(got)
+    v["docs"] = seen
+    return v
+
+
+# ---------------------------------------------------------------- 合并
+
+def merge(verdicts: Iterable[Any]) -> Dict[str, Any]:
+    """多份产物 → 站点结论。
+
+    口径：只要这轮拿到过 2xx，站点就是活的（present），拦截证据写进 note 不吞掉；
+    一条 2xx 都没有而出现拦截证据 → 整站 blocked；其余按「有 404 也有说不清」= 不确定。
+    这样既不把「一个路径需要登录」误判成全站被拦，也不让全站 403 滑成「不存在」。
+    """
+    items = [v for v in (verdicts or []) if isinstance(v, dict) and v.get("state")]
+    if not items:
+        return _v(UNKNOWN, [], "没有任何响应判据")
+    names: List[str] = []
+    reasons: List[str] = []
+    for v in items:
+        names += list(v.get("waf_names") or [])
+        r = str(v.get("reason") or "").strip()
+        if r and r not in reasons:
+            reasons.append(r)
+    names = list(dict.fromkeys(names))
+    merged_names = _names_from_vendors(names)
+    states = [v["state"] for v in items]
+    status = next((int(v.get("status") or 0) for v in items if int(v.get("status") or 0)), 0)
+    kind = next((str(v.get("kind") or "") for v in items if v.get("kind")), "")
+
+    def _why(state: str) -> str:
+        """只取结论相同的那些理由：把「404 没有拦截特征」和「被拦」拼在一起，读者会更糊涂。"""
+        out: List[str] = []
+        for v in items:
+            if v.get("state") == state:
+                r = str(v.get("reason") or "").strip()
+                if r and r not in out:
+                    out.append(r)
+        return "；".join(out[:2])
+
+    if PRESENT in states:
+        return _v(PRESENT, merged_names, _why(PRESENT) or "；".join(reasons[:2]), status, kind)
+    if BLOCKED in states:
+        return _v(BLOCKED, merged_names, _why(BLOCKED), status, kind)
+    if all(s == ABSENT for s in states):
+        return _v(ABSENT, merged_names, _why(ABSENT), status, kind)
+    return _v(UNKNOWN, merged_names, _why(UNKNOWN) or "；".join(reasons[:2]), status, kind)
+
+
+def merge_state(a: str, b: str) -> str:
+    """两格状态合并（入库时同一条命中被多份产物覆盖用）。坏消息优先。"""
+    a = norm_state(a, strict=False)
+    b = norm_state(b, strict=False)
+    if not a:
+        return b
+    if not b:
+        return a
+    return a if STATE_RANK.get(a, 0) >= STATE_RANK.get(b, 0) else b
+
+
+def norm_state(raw: Any, strict: bool = True) -> str:
+    """任意写法 → 四态之一。strict 时认不出就抛（CLI 过滤参数要报错，不能静默忽略）。"""
+    token = str(raw or "").strip().lower()
+    if not token:
+        return ""
+    if token in STATES:
+        return token
+    if token in STATE_ALIASES:
+        return STATE_ALIASES[token]
+    if strict:
+        raise ValueError(f"未知 WAF 三态：{raw}")
+    return ""
+
+
+def label(state: str) -> str:
+    return STATE_LABELS.get(norm_state(state, strict=False), "")
+
+
+def badge(state: str) -> str:
+    return STATE_BADGES.get(norm_state(state, strict=False), "")
+
+
+def note(v: Any) -> str:
+    """一句话结论，给日志/报告/表格尾巴用。"""
+    if not isinstance(v, dict) or not v.get("state"):
+        return ""
+    s = v.get("state")
+    who = v.get("waf") or ""
+    if s == BLOCKED:
+        # 认不出厂商也照样说「被 WAF 拦」：403 是拦截事实，厂商只是锦上添花。
+        # 写成「被拦（拦截方未识别）」会让人以为还不确定拦没拦，反而弱化了结论。
+        head = f"被 WAF 拦（{who}）" if who else "被 WAF 拦（未识别厂商）"
+    elif s == UNKNOWN:
+        head = f"不确定（{who}）" if who else "不确定"
+    elif s == ABSENT:
+        head = "真不存在"
+    else:
+        head = f"正常响应（{who}）" if who else "正常响应"
+    reason = str(v.get("reason") or "").strip()
+    if not reason or reason == head:
+        return head
+    return f"{head}：{reason}"
+
+
+def absent_is_confirmed(v: Any) -> bool:
+    """这条结论能不能拿去写「确认不存在」。只有 absent 一个态可以。"""
+    return isinstance(v, dict) and v.get("state") == ABSENT
+
+
+def summary(verdicts: Iterable[Any]) -> Dict[str, int]:
+    """按状态计数（给 list 抬头用）。"""
+    out = {s: 0 for s in STATES}
+    for v in verdicts or []:
+        s = v.get("state") if isinstance(v, dict) else ""
+        if s in out:
+            out[s] += 1
+    return out

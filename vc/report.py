@@ -18,6 +18,8 @@ import re
 import time
 from typing import Any, Dict, Iterable, List, Optional
 
+from . import waf as wafmod
+
 SEV_ORDER = ("critical", "high", "medium", "low", "info")
 SEV_CN = {"critical": "严重", "high": "高危", "medium": "中危", "low": "低危", "info": "信息"}
 
@@ -161,6 +163,10 @@ def render(rows: Iterable[Dict[str, Any]], *, title: str = "空境 Kara 扫描�
     if stats:
         a(f"- 入账：新解析 {stats.get('parsed', 0)} 个产物，新增 {stats.get('findings_added', 0)} 条，"
           f"合并 {stats.get('findings_merged', 0)} 条，资产 +{stats.get('assets', 0)}")
+    # 被拦的那批要在抬头就点出来：报告读者看到的「0 命中」必须和「被拦」分得开
+    blocked = [r for r in rows if (r.get("waf_state") or "") == "blocked"]
+    if blocked:
+        a(f"- **被 WAF 拦**：{len(blocked)} 条 —— 被拦 ≠ 不存在，这几条要换出口/降速后重测再下结论")
     a("")
     a("> 级别口径：**L1** = 只到「看得见 / 可能受影响」（未验证可利用）；"
       "**L2** = 拿到了真实数据或凭据；**L3** = 拿到内部权限。交付看 L2 及以上。")
@@ -226,6 +232,12 @@ def render(rows: Iterable[Dict[str, Any]], *, title: str = "空境 Kara 扫描�
             a("")
         a(f"- **状态**：{(r.get('status') or '待验证')}"
           + (f"　**复验**：{r.get('verify_state')}" if r.get("verify_state") else ""))
+        if r.get("waf_state"):
+            # 每条命中自己带的三态：写报告的人不用回头查扫描日志就知道这条是不是被拦的
+            who = f"（{r['waf']}）" if r.get("waf") else ""
+            a(f"- **WAF 三态**：{wafmod.label(r['waf_state'])}{who}"
+              + ("　—— 被拦 ≠ 不存在：这条要么换出口重测，要么在报告里注明「未测到」"
+                 if r["waf_state"] == "blocked" else ""))
         if r.get("first_seen"):
             a(f"- **首次发现**：{r['first_seen']}　（最近：{r.get('last_seen') or '-'}）")
         if r.get("files"):

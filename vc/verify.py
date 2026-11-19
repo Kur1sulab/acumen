@@ -52,6 +52,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import parsers_sweep as ps
+from . import waf as wafmod
 
 # 来源标签 → 引擎子命令。只有本机引擎跑出来的条目才谈得上复验。
 # strike/brute/cve 的来源带冒号后缀（check 名/服务名/CVE 号），查表前剥掉。
@@ -293,6 +294,11 @@ def _reach(doc: Dict[str, Any]) -> Optional[bool]:
         kind = str(bl.get("kind") or "").lower()
         if kind == "unknown":
             return False
+        # uniform403 = 整站 403。那说明这一轮拿到的是拦截页而不是内容，
+        # 「没找到原命中」只能说明被拦了，不能说明漏洞没了（否则 WAF 一上线，
+        # 全库的命中都会被复验成「已消失」——最典型的一类假修复）。
+        if kind == "uniform403":
+            return False
         return True
     entries = doc.get("all")
     if isinstance(entries, list) and entries and all(isinstance(x, dict) for x in entries):
@@ -341,17 +347,18 @@ def _reach_brute(rows: List[Any]) -> Optional[bool]:
     return True
 
 
-def _collect(root: str) -> Tuple[set, List[Dict[str, Any]], str]:
-    """读一遍新产物：认出哪些类型的结果、解析出哪些命中。
+def _collect(root: str) -> Tuple[set, List[Dict[str, Any]], str, Dict[str, Any]]:
+    """读一遍新产物：认出哪些类型的结果、解析出哪些命中、这轮到底有没有被拦。
 
-    返回 (认到的结果类型集合, 命中列表, 错误说明)。错误说明非空表示产物不可信。
+    返回 (认到的结果类型集合, 命中列表, 错误说明, WAF 三态)。错误说明非空表示产物不可信。
     """
     kinds: set = set()
     items: List[Dict[str, Any]] = []
     reach: Optional[bool] = None
+    verdicts: List[Dict[str, Any]] = []
     rootp = pathlib.Path(root)
     if not rootp.is_dir():
-        return kinds, items, "引擎没有产出目录"
+        return kinds, items, "引擎没有产出目录", wafmod.merge([])
     files = 0
     for p in sorted(rootp.rglob("*.json")):
         try:
@@ -369,6 +376,7 @@ def _collect(root: str) -> Tuple[set, List[Dict[str, Any]], str]:
                 kinds.add(kind)
             if isinstance(obj, dict):
                 one = _reach(obj)
+                verdicts.append(wafmod.classify_doc(obj))
             elif kind == "sweep_brute":
                 one = _reach_brute(obj)
             else:
@@ -381,11 +389,17 @@ def _collect(root: str) -> Tuple[set, List[Dict[str, Any]], str]:
         res = ps.parse(text, str(p))
         if res:
             items.extend(res.findings)
+    wv = wafmod.merge(verdicts)
     if not files:
-        return kinds, items, "产物目录是空的"
+        return kinds, items, "产物目录是空的", wv
+    # 被拦要先判：拦截页 = 没拿到内容，「这一轮没这条」只能说明没测到。
+    # 先判它再看 reach，否则「整站 403」会被下面的「连不上」口径盖掉（后果一样但话说不清）。
+    if wv["state"] == wafmod.BLOCKED:
+        # 结论放最前面：列表里这一行会被截断，截掉的必须是厂商细节，不能是结论本身
+        return kinds, items, f"拦截页不能判「已消失」：目标这次{wafmod.note(wv)}", wv
     if reach is False:
-        return kinds, items, "引擎产物证明不了这次真测到了目标（连不上 / 检查全跳过 / 没指纹），这次重跑不作数"
-    return kinds, items, ""
+        return kinds, items, "引擎产物证明不了这次真测到了目标（连不上 / 检查全跳过 / 没指纹），这次重跑不作数", wv
+    return kinds, items, "", wv
 
 
 def _fresh_note(items: List[Dict[str, Any]], want: str) -> str:
@@ -399,7 +413,7 @@ def _fresh_note(items: List[Dict[str, Any]], want: str) -> str:
 def run_group(engine: str, plan: Dict[str, Any], timeout: int) -> Dict[str, Any]:
     """跑一组（一个模式 × 一个目标），只看结果不下结论。"""
     tmp = tempfile.mkdtemp(prefix="kara-verify-")
-    out = {"kinds": set(), "items": [], "error": "", "elapsed": 0.0, "note": ""}
+    out = {"kinds": set(), "items": [], "error": "", "elapsed": 0.0, "note": "", "waf": {}}
     t0 = time.time()
     try:
         proc = subprocess.run([engine] + plan["argv"], cwd=tmp, capture_output=True,
@@ -410,8 +424,8 @@ def run_group(engine: str, plan: Dict[str, Any], timeout: int) -> Dict[str, Any]
         if proc.returncode != 0:
             out["error"] = f"引擎退出码 {proc.returncode}" + (f"：{tail}" if tail else "")
             return out
-        kinds, items, err = _collect(os.path.join(tmp, "out"))
-        out.update(kinds=kinds, items=items, error=err)
+        kinds, items, err, wv = _collect(os.path.join(tmp, "out"))
+        out.update(kinds=kinds, items=items, error=err, waf=wv)
         return out
     except subprocess.TimeoutExpired:
         out["elapsed"] = round(time.time() - t0, 1)
@@ -503,6 +517,15 @@ class Verifier:
                 self._progress(current=f"{mode} · {base}")
                 res = run_group(self.engine, g["plan"], self.timeout)
                 kind = g["plan"]["kind"]
+                wv = res.get("waf") or {}
+                if wv.get("state") == wafmod.BLOCKED:
+                    # 命中本体也打上「被拦」——列表页那一列必须能看见，
+                    # 否则这条记录在别人眼里还是「上次扫出来过」的普通命中
+                    try:
+                        self.store.set_waf([int(r["id"]) for r in g["rows"]],
+                                           wafmod.BLOCKED, str(wv.get("waf") or ""))
+                    except Exception:
+                        pass
                 ran_ok = not res["error"] and (not kind or kind in res["kinds"])
                 for r in g["rows"]:
                     want = ident(r.get("title"))

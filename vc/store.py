@@ -24,6 +24,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from .parsers import sev_rank, max_sev
 from .verify import (LIVENESS_LABELS, LIVENESS_STATES, LIVENESS_TOKENS,
                      liveness_of, liveness_summary)
+from . import waf as wafmod
 
 SEV_ORDER = ("critical", "high", "medium", "low", "info")
 STATUS_CHOICES = ("待验证", "已确认", "误报", "已修复", "已忽略")
@@ -76,11 +77,16 @@ class Store:
                              ("verify_at", "TEXT DEFAULT ''"),
                              ("verify_times", "INTEGER DEFAULT 0"),
                              ("verify_note", "TEXT DEFAULT ''"),
-                             ("base", "TEXT DEFAULT ''")):
+                             ("base", "TEXT DEFAULT ''"),
+                             # WAF 三态：blocked/absent/unknown/present。
+                             # 「被拦」不许计成「已确认不存在」，所以状态要和 404 分开存。
+                             ("waf_state", "TEXT DEFAULT ''"),
+                             ("waf", "TEXT DEFAULT ''")):
                 if col not in cols:
                     self.conn.execute(f"ALTER TABLE findings ADD COLUMN {col} {ddl}")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_f_cve ON findings(cve)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_f_vfy ON findings(verify_state)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_f_waf ON findings(waf_state)")
             self.conn.commit()
 
     # ------------------------------------------------------------ schema
@@ -102,7 +108,8 @@ class Store:
                     repro TEXT DEFAULT '',
                     verify_state TEXT DEFAULT '', verify_at TEXT DEFAULT '',
                     verify_times INTEGER DEFAULT 0, verify_note TEXT DEFAULT '',
-                    base TEXT DEFAULT ''
+                    base TEXT DEFAULT '',
+                    waf_state TEXT DEFAULT '', waf TEXT DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS idx_f_sev   ON findings(sev_rank DESC);
                 CREATE INDEX IF NOT EXISTS idx_f_asset ON findings(asset);
@@ -188,14 +195,17 @@ class Store:
                 if row is None:
                     self.conn.execute(
                         """INSERT INTO findings(key,asset,ip,port,endpoint,param,title,cve,sev,sev_rank,
-                                                sources,evidence,count,status,first_seen,last_seen,files,repro,base)
-                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                                sources,evidence,count,status,first_seen,last_seen,files,repro,base,
+                                                waf_state,waf)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (key, f.get("asset", ""), f.get("ip", ""), f.get("port"),
                          f.get("endpoint", ""), f.get("param", ""), f.get("title", ""),
                          f.get("cve", ""), sev, sev_rank(sev), f.get("source", ""), f.get("evidence", ""),
                          int(f.get("count") or 1), "待验证",
                          f.get("first_seen") or ts, ts, src_file[-300:],
-                         str(f.get("repro") or "")[:1200], str(f.get("base") or "")[:200]),
+                         str(f.get("repro") or "")[:1200], str(f.get("base") or "")[:200],
+                         wafmod.norm_state(f.get("waf_state"), strict=False),
+                         str(f.get("waf") or "")[:120]),
                     )
                     added += 1
                 else:
@@ -207,7 +217,8 @@ class Store:
                                first_seen=?, last_seen=?, files=?, ip=COALESCE(NULLIF(ip,''),?), 
                                port=COALESCE(port,?),
                                cve=?, repro=COALESCE(NULLIF(repro,''),?),
-                               base=COALESCE(NULLIF(base,''),?)
+                               base=COALESCE(NULLIF(base,''),?),
+                               waf_state=?, waf=?
                            WHERE key=?""",
                         (row["count"] + int(f.get("count") or 1), best_sev, sev_rank(best_sev),
                          _merge_uniq(row["sources"], [f.get("source", "")]),
@@ -216,7 +227,11 @@ class Store:
                          f.get("ip", ""), f.get("port"),
                          _merge_uniq(row["cve"], [f.get("cve", "")], cap=8),
                          str(f.get("repro") or "")[:1200],
-                         str(f.get("base") or "")[:200], key),
+                         str(f.get("base") or "")[:200],
+                         # 同一命中被多份产物看到时取「最坏」的那格：被拦的证据不许被后来的
+                         # 404 覆盖掉，否则合并一次就把「拦」洗成「不存在」。
+                         wafmod.merge_state(row["waf_state"] or "", str(f.get("waf_state") or "")),
+                         _merge_uniq(row["waf"], str(f.get("waf") or "").split(","), cap=4), key),
                     )
                     merged += 1
             self.conn.commit()
@@ -292,6 +307,10 @@ class Store:
                    GROUP BY title ORDER BY r DESC, n DESC LIMIT 12""").fetchall()]
             last = self.conn.execute("SELECT MAX(scanned_at) t FROM files").fetchone()["t"]
             repro_n = self.conn.execute("SELECT COUNT(*) c FROM findings WHERE repro<>''").fetchone()["c"]
+            # WAF 三态分布：抬头要能一眼看出「这库里有多少条是被拦，不是不存在」
+            by_waf = [dict(r) for r in self.conn.execute(
+                "SELECT waf_state, COUNT(*) n FROM findings WHERE waf_state<>'' "
+                "GROUP BY waf_state").fetchall()]
         by_verify = self.verify_stats()   # 锁是 RLock，放在 with 外面只为读着清楚
         sev_counts = {s: 0 for s in SEV_ORDER}
         hits = {s: 0 for s in SEV_ORDER}
@@ -309,6 +328,7 @@ class Store:
             "by_source": by_source,
             "by_status": by_status,
             "by_verify": by_verify,
+            "by_waf": by_waf,
             "repro": repro_n or 0,
             "top_assets": top_assets,
             "by_type": by_type,
@@ -318,7 +338,7 @@ class Store:
 
     @staticmethod
     def _filter(sev: str = "", status: str = "", q: str = "", asset: str = "",
-                liveness: str = "") -> Tuple[str, List[Any]]:
+                liveness: str = "", waf: str = "") -> Tuple[str, List[Any]]:
         """筛选子句：列表页与导出共用同一套条件，保证「导出的就是你看到的」。"""
         where: List[str] = []
         args: List[Any] = []
@@ -342,14 +362,20 @@ class Store:
         if asset:
             where.append("asset LIKE ?")
             args.append(f"%{asset}%")
+        if waf:
+            # WAF 三态过滤（blocked/absent/unknown/present）。认不出的取值直接抛，
+            # 静默忽略会让人把「筛出来是空的」读成「库里没有」——又一个假结论。
+            where.append("waf_state=?")
+            args.append(wafmod.norm_state(waf))
         if q:
             where.append("(title LIKE ? OR endpoint LIKE ? OR evidence LIKE ? OR asset LIKE ?)")
             args.extend([f"%{q}%"] * 4)
         return (("WHERE " + " AND ".join(where)) if where else ""), args
 
     def findings(self, sev: str = "", asset: str = "", status: str = "", q: str = "",
-                 limit: int = 200, offset: int = 0, liveness: str = "") -> Dict[str, Any]:
-        clause, args = self._filter(sev, status, q, asset, liveness=liveness)
+                 limit: int = 200, offset: int = 0, liveness: str = "",
+                 waf: str = "") -> Dict[str, Any]:
+        clause, args = self._filter(sev, status, q, asset, liveness=liveness, waf=waf)
         with self.lock:
             total = self.conn.execute(f"SELECT COUNT(*) c FROM findings {clause}", args).fetchone()["c"]
             rows = self.conn.execute(
@@ -509,26 +535,48 @@ class Store:
             return [dict(r) for r in self.conn.execute(
                 "SELECT verify_state, COUNT(*) n FROM findings GROUP BY verify_state").fetchall()]
 
+    def set_waf(self, ids: List[int], state: str, names: str = "") -> int:
+        """把一批命中的 WAF 三态刷掉（复验发现被拦时用）。
+
+        为什么单独一个方法：复验的结论（verify_state）和这次到底有没有被拦是两件事。
+        被拦只说明「这次没测到」，不许顺手把命中写成「已消失」——状态得留在 waf_state 里，
+        让 list/报告能当着人面说清「是拦，不是没了」。
+        """
+        token = wafmod.norm_state(state)
+        if not ids:
+            return 0
+        rows = ",".join("?" * len(ids))
+        with self.lock:
+            cur = self.conn.execute(
+                f"UPDATE findings SET waf_state=?, waf=CASE WHEN ?='' THEN waf ELSE ? END "
+                f"WHERE id IN ({rows})",
+                [token, names, str(names)[:120]] + [int(i) for i in ids],
+            )
+            self.conn.commit()
+            return cur.rowcount or 0
+
     # ------------------------------------------------------------ 导出
 
     def export_csv(self, sev: str = "", status: str = "", q: str = "",
-                   liveness: str = "") -> str:
+                   liveness: str = "", waf: str = "") -> str:
         buf = io.StringIO()
         w = csv.writer(buf)
         w.writerow(["严重度", "漏洞名称", "资产", "IP", "端口", "端点", "参数", "命中次数", "来源", "状态",
-                    "存活", "复验", "复验时间", "首次发现", "最近发现", "证据", "复现命令"])
-        clause, args = self._filter(sev, status, q, liveness=liveness)
+                    "存活", "复验", "复验时间", "首次发现", "最近发现", "证据", "复现命令", "WAF 三态"])
+        clause, args = self._filter(sev, status, q, liveness=liveness, waf=waf)
         with self.lock:
             rows = self.conn.execute(
                 f"SELECT * FROM findings {clause} ORDER BY sev_rank DESC, count DESC, asset", args).fetchall()
         for r in rows:
+            # 导出也要带三态：别人拿 csv 去写报告时，「被拦」和「不存在」得能分开
             w.writerow([r["sev"], r["title"], r["asset"], r["ip"], r["port"], r["endpoint"], r["param"],
                         r["count"], r["sources"], r["status"], liveness_of(r), r["verify_state"], r["verify_at"],
-                        r["first_seen"], r["last_seen"], r["evidence"], r["repro"]])
+                        r["first_seen"], r["last_seen"], r["evidence"], r["repro"],
+                        wafmod.label(r["waf_state"] or "") or "未判定"])
         return buf.getvalue()
 
     def export_md(self, sev: str = "", status: str = "", q: str = "",
-                  liveness: str = "") -> str:
+                  liveness: str = "", waf: str = "") -> str:
         s = self.summary()
         lines = [f"# 漏扫结果整理（{s['generated_at']}）", ""]
         lines.append(f"- 发现条目：**{s['findings']}**（累计命中 {s['hits']} 次）")
@@ -540,10 +588,14 @@ class Store:
             lines.append("- 复验：" + " / ".join(f"{k} {v}" for k, v in vfy.items()))
         live = liveness_summary(s.get("by_verify") or [])
         lines.append("- 存活：" + " / ".join(f"{LIVENESS_LABELS[t]} {live[t]}" for t in LIVENESS_TOKENS))
+        wf = {wafmod.label(r["waf_state"]): r["n"] for r in (s.get("by_waf") or []) if r.get("waf_state")}
+        if wf:
+            # 三态要出现在报告抬头：被拦的那批不计入「确认不存在」，读者得先知道有多少条
+            lines.append("- WAF 三态：" + " / ".join(f"{k} {v}" for k, v in wf.items()))
         lines += ["", "## 漏洞清单", "",
-                  "| 严重度 | 漏洞 | 资产 | 端点 | 命中 | 来源 | 状态 | 复验 |",
-                  "|---|---|---|---|---|---|---|---|"]
-        clause, args = self._filter(sev, status, q, liveness=liveness)
+                  "| 严重度 | 漏洞 | 资产 | 端点 | 命中 | 来源 | 状态 | 复验 | WAF |",
+                  "|---|---|---|---|---|---|---|---|---|"]
+        clause, args = self._filter(sev, status, q, liveness=liveness, waf=waf)
         with self.lock:
             rows = self.conn.execute(
                 f"SELECT * FROM findings {clause} ORDER BY sev_rank DESC, count DESC LIMIT 500",
@@ -551,7 +603,8 @@ class Store:
         for r in rows:
             ep = (r["endpoint"] or "").replace("|", "\\|")
             lines.append(f"| {r['sev']} | {r['title']} | {r['asset']} | {ep} | {r['count']} | "
-                         f"{r['sources']} | {r['status']} | {r['verify_state'] or '未复验'} |")
+                         f"{r['sources']} | {r['status']} | {r['verify_state'] or '未复验'} | "
+                         f"{wafmod.label(r['waf_state'] or '') or '未判定'} |")
         repro = [r for r in rows if (r["repro"] or "").strip()]
         if repro:
             # 复现材料单独列出来：报告里能直接粘的那一段，比表格有用

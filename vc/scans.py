@@ -24,6 +24,8 @@ import subprocess
 import threading
 import time
 
+from . import waf as wafmod
+
 # ---------------------------------------------------------------- 模式表
 
 # flag 与 sweep 子命令一一对应（见 sweep help）：
@@ -267,11 +269,20 @@ class ScanManager:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     job_id INTEGER, target TEXT, status TEXT, step TEXT,
                     steps TEXT, exit_code INTEGER, started REAL, finished REAL,
-                    findings INTEGER DEFAULT 0, error TEXT
+                    findings INTEGER DEFAULT 0, error TEXT,
+                    waf TEXT DEFAULT '', waf_state TEXT DEFAULT '', waf_note TEXT DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS idx_sr_job ON scan_runs(job_id);
                 """
             )
+            # 老库补列（幂等）：WAF 三态是后加的，不能让已有任务表读不出字段
+            cols = {r[1] for r in self._conn.execute("PRAGMA table_info(scan_runs)")}
+            for col, ddl in (("waf", "TEXT DEFAULT ''"),
+                             ("waf_state", "TEXT DEFAULT ''"),
+                             ("waf_note", "TEXT DEFAULT ''")):
+                if col not in cols:
+                    self._conn.execute(f"ALTER TABLE scan_runs ADD COLUMN {col} {ddl}")
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_sr_waf ON scan_runs(waf_state)")
             self._conn.commit()
 
     def _exec(self, sql: str, args=()) -> None:
@@ -401,6 +412,9 @@ class ScanManager:
                 "exit_code": (live or {}).get("exit_code", r["exit_code"]),
                 "error": (live or {}).get("error") or r["error"] or "",
                 "findings": self._count_findings(j["dir"] or "", r["target"]),
+                # 三态进结果结构（不是只进日志）：前端/CLI 拿 runs 就能标出「被拦」，
+                # 而「0 命中」这种行必须带着这个标记才不会被读成「不存在」
+                "waf": self._waf_of(r),
             })
         log = self._logs.get(j["id"])
         if log_from is None:
@@ -593,12 +607,28 @@ class ScanManager:
             st.update({"status": status, "finished": time.time(), "exit_code": code, "error": err})
             steps = st.get("steps") or []
             self._live[run_id] = st
+        # WAF 指纹前置的收口：引擎跑完，先判「这轮到底拿到内容没有」，再和命中数一起落库。
+        # 为什么必须落库而不是只写日志：列表页上那行「0 命中」是所有人真正会看的东西，
+        # 日志没人翻。被拦的轮次必须带着 waf_state 进结果结构，否则「被拦」又被读成「不存在」。
+        wv = wafmod.classify_tree(os.path.join(job_dir, "out"), target)
+        if status != "ok" and wv["state"] != wafmod.BLOCKED:
+            # 没跑完（停止/超时/崩溃）的轮次本就没资格下「不存在」的结论
+            wv = dict(wv, state=wafmod.UNKNOWN, label=wafmod.STATE_LABELS[wafmod.UNKNOWN],
+                      badge=wafmod.badge(wafmod.UNKNOWN),
+                      reason=f"这一轮状态 {status}，产物不全，谈不上「不存在」")
         self._exec("UPDATE scan_runs SET status=?, step=?, steps=?, exit_code=?, finished=?, "
-                   "error=?, findings=? WHERE id=?",
+                   "error=?, findings=?, waf=?, waf_state=?, waf_note=? WHERE id=?",
                    (status, st.get("step") or "", json.dumps(steps, ensure_ascii=False), code,
-                    time.time(), err, self._count_findings(job_dir, target), run_id))
+                    time.time(), err, self._count_findings(job_dir, target),
+                    wv["waf"], wv["state"], wv["reason"][:400], run_id))
         self._log(job_id, target, f"— {status.upper()} 用时 {self._elapsed(st.get('started'), st.get('finished'))}s"
                                  + (f" · {err}" if err else ""))
+        if wv["state"] == wafmod.BLOCKED:
+            self._log(job_id, target, f"[WAF] {wafmod.note(wv)} —— 本轮命中数不代表「不存在」，"
+                                      f"报告里必须按「被拦」写")
+        elif wv["state"] == wafmod.UNKNOWN and wv.get("status"):
+            # 没有 WAF 名也没有拦截码的 5xx/挑战页，只提示一句，不刷屏
+            self._log(job_id, target, f"[WAF] {wafmod.note(wv)}")
         self._kick_ingest()
 
     def _tail_progress(self, run_id: int, path: str, stop_evt: threading.Event) -> None:
@@ -665,16 +695,35 @@ class ScanManager:
 
     def _run_counts(self, job_id: int) -> dict:
         out = {"total": 0, "queued": 0, "running": 0, "ok": 0, "failed": 0,
-               "stopped": 0, "timeout": 0, "interrupted": 0}
+               "stopped": 0, "timeout": 0, "interrupted": 0,
+               "waf_blocked": 0, "waf_unknown": 0}
         for r in self._rows("SELECT status, COUNT(*) c FROM scan_runs WHERE job_id=? "
                             "GROUP BY status", (int(job_id),)):
             out[r["status"]] = r["c"]
             out["total"] += r["c"]
+        # 被拦/不确定的目标数单独计数——抬头只报「0 命中」会把这两类混进去
+        try:
+            for r in self._rows("SELECT waf_state, COUNT(*) c FROM scan_runs WHERE job_id=? "
+                                "AND waf_state<>'' GROUP BY waf_state", (int(job_id),)):
+                key = {"blocked": "waf_blocked", "unknown": "waf_unknown"}.get(str(r["waf_state"]))
+                if key:
+                    out[key] = r["c"]
+        except sqlite3.Error:
+            pass    # 老库没有这三列时不影响任务列表显示
         # 内存里跑着的 run 以实时状态为准（DB 里还没落）
         for st in self._live.values():
             if st.get("job_id") == int(job_id) and st.get("status") == "running":
                 pass
         return out
+
+    @staticmethod
+    def _waf_of(row) -> dict:
+        """scan_runs 行 → 三态结论。空状态 = 这条记录没判过（老数据/引擎没产物）。"""
+        state = str(row["waf_state"] or "") if "waf_state" in row.keys() else ""
+        if not state:
+            return {}
+        return {"state": state, "label": wafmod.label(state), "badge": wafmod.badge(state),
+                "waf": str(row["waf"] or ""), "note": str(row["waf_note"] or "")}
 
     def _count_findings(self, job_dir: str, target) -> int:
         """统计这批产物入账了多少条命中（按来源文件路径反查，不猜）。"""

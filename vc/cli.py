@@ -32,6 +32,7 @@ from . import paths as kpaths
 from . import report as kreport
 from . import scans as sc
 from . import verify as vfy
+from . import waf as wafmod
 from .ingest import Ingestor
 from .store import Store
 
@@ -284,6 +285,33 @@ def _level_of(row: Dict[str, Any]) -> str:
     return "-"
 
 
+def _show_scan_waf(mgr: Any, job_id: int) -> None:
+    """扫完先报 WAF 三态，再报命中。
+
+    顺序是有讲究的：先看见「这个目标被拦了」，后面那行「0 命中」才不会被误读成
+    「目标上什么都没有」。这就是总纲 4.1 要的「指纹前置」在输出层的落点。
+    """
+    try:
+        runs = mgr.job(job_id).get("runs") or []
+    except Exception:
+        return
+    marked = [r for r in runs if (r.get("waf") or {}).get("state")]
+    if not marked:
+        return
+    rows = []
+    for r in marked:
+        w = r["waf"]
+        rows.append([_cut(r.get("target") or "-", 34), w.get("badge") or "-",
+                     _cut(w.get("label") or "", 10), _cut(w.get("waf") or "未识别", 22),
+                     r.get("findings") or 0])
+    print()
+    print(_table(["目标", "", "三态", "WAF", "命中"], rows, [34, 2, 10, 22, 4]))
+    n_block = sum(1 for r in marked if r["waf"].get("state") == wafmod.BLOCKED)
+    if n_block:
+        print(_c(f"  ↑ {n_block} 个目标被 WAF 拦：命中的 0 条不代表「不存在」，"
+                 f"报告里按「被拦」写，别写成「未发现」", "33"))
+
+
 def _show_new(ctx: Ctx, before: int) -> int:
     rows = [dict(r) for r in ctx.store.conn.execute(
         "SELECT id,sev,title,asset,endpoint,count,evidence FROM findings WHERE id > ? "
@@ -317,6 +345,8 @@ def cmd_status(ctx: Ctx, args: argparse.Namespace) -> int:
     print(f"  存量　漏洞 {s['findings']} 条 / 命中 {s['hits']} 次　资产 {s['assets']}　文件 {s['files']}")
     print("  分级　" + "　".join(f"{k} {sev.get(k, 0)}" for k in SEV_ORDER))
     print("  存活　" + _liveness_line(vfy.liveness_summary(s.get("by_verify") or [])))
+    if s.get("by_waf"):
+        print("  三态　" + _waf_line(s.get("by_waf")))
     if s.get("last_scan"):
         print(f"  最近　{s['last_scan']}")
     print()
@@ -366,6 +396,7 @@ def cmd_scan(ctx: Ctx, args: argparse.Namespace) -> int:
     started = time.strftime("%Y-%m-%d %H:%M:%S")
     res = mgr.start(mode, targets, parallel=args.parallel, timeout=args.timeout)
     _run_job_loop(mgr, res["job_id"])
+    _show_scan_waf(mgr, res["job_id"])
     stats = _ingest(ctx)
     _show_new(ctx, before)
 
@@ -412,9 +443,41 @@ def _ports_text(ports: Any, cap: int = 8) -> str:
     return head + (f" …+{len(items) - cap}" if len(items) > cap else "")
 
 
+def _norm_waf(raw: str) -> str:
+    """--waf 取值归一。认不出的直接抛：静默忽略会让人把空结果读成「库里没有」。"""
+    try:
+        return wafmod.norm_state(raw)
+    except ValueError:
+        raise ValueError(f"未知 WAF 三态：{raw}（可选 blocked / absent / unknown / present）")
+
+
+def _waf_cell(r: Dict[str, Any]) -> str:
+    """列表的 WAF 列：符号 + 厂商名（认不出厂商才退回状态词）。空状态显示 -（没判过）。"""
+    state = str(r.get("waf_state") or "")
+    if not state:
+        return "-"
+    names = [x.strip() for x in str(r.get("waf") or "").split(",") if x.strip()]
+    return f"{wafmod.badge(state)} {names[0] if names else wafmod.label(state)}"
+
+
+def _waf_line(by_waf: Any) -> str:
+    """三态汇总行：恒显示四桶，被拦那桶非零就加粗——它是唯一会被误读成「不存在」的一桶。"""
+    counts = {s: 0 for s in wafmod.STATES}
+    for row in by_waf or []:
+        if isinstance(row, dict) and row.get("waf_state") in counts:
+            counts[row["waf_state"]] = int(row.get("n") or 0)
+    parts = []
+    for s in (wafmod.BLOCKED, wafmod.UNKNOWN, wafmod.ABSENT, wafmod.PRESENT):
+        n = counts[s]
+        seg = f"{wafmod.badge(s)} {wafmod.label(s)} "
+        parts.append(seg + _c(str(n), "1") if n else _c(seg + "0", "90"))
+    return " · ".join(parts)
+
+
 def cmd_list(ctx: Ctx, args: argparse.Namespace) -> int:
     try:
         liveness = _norm_liveness(getattr(args, "liveness", ""))
+        waf = _norm_waf(getattr(args, "waf", ""))
     except ValueError as exc:
         print(f"[!] {exc}", file=sys.stderr)
         return 2
@@ -423,10 +486,10 @@ def cmd_list(ctx: Ctx, args: argparse.Namespace) -> int:
         if args.csv:
             # 带 BOM：Windows Excel 双击不乱码
             data = ctx.store.export_csv(sev=args.sev, status=args.status, q=args.q,
-                                        liveness=liveness).encode("utf-8-sig")
+                                        liveness=liveness, waf=waf).encode("utf-8-sig")
         else:
             rows = ctx.store.findings(sev=args.sev, status=args.status, q=args.q,
-                                      limit=10000, liveness=liveness)["rows"]
+                                      limit=10000, liveness=liveness, waf=waf)["rows"]
             data = kreport.render(rows, title="空境 Kara 漏洞清单", db=ctx.db,
                                   notes=["按当前筛选条件导出的清单（与自动报告同一渲染器）"]).encode("utf-8")
         with open(out, "wb") as fh:
@@ -456,23 +519,34 @@ def cmd_list(ctx: Ctx, args: argparse.Namespace) -> int:
 
     # 汇总先行：产品承诺「每一条命中都回答：现在还活着吗」，存量分布放第一行。
     # 这是全库口径（不随 --sev/--q/--liveness 变），筛选后的条数看底部「共 N 条」。
+    summary = ctx.store.summary()
     print("存量　" + _liveness_line(vfy.liveness_summary(ctx.store.verify_stats())))
+    # WAF 三态紧跟存活：被拦的那批必须和「确认不存在」分两栏读，
+    # 否则列表上同样一个 0 命中，谁也分不清是没东西还是被挡了。
+    print("三态　" + _waf_line(summary.get("by_waf")))
+    blocked_n = sum(int(r.get("n") or 0) for r in (summary.get("by_waf") or [])
+                    if r.get("waf_state") == wafmod.BLOCKED)
+    if blocked_n:
+        print(_c(f"　　　↑ 其中 {blocked_n} 条是「被拦」，不计入「已确认不存在」；"
+                 f"换出口/降速/加白名单后重测才算数", "33"))
     print()
     data = ctx.store.findings(sev=args.sev, status=args.status, q=args.q,
-                              limit=args.limit, liveness=liveness)
+                              limit=args.limit, liveness=liveness, waf=waf)
     rows = data["rows"]
     if not rows:
         print("库里没有符合条件的条目。先 kara scan。")
         return 0
-    print(_table(["ID", "严重度", "存活", "标题", "资产", "端点", "级别", "次数", "状态"],
-                 [[r["id"], _sev(r["sev"]), _live(vfy.liveness_of(r)), _cut(r["title"], 36),
-                   _cut(r["asset"], 24), _cut(r["endpoint"] or "-", 28),
+    print(_table(["ID", "严重度", "存活", "WAF", "标题", "资产", "端点", "级别", "次数", "状态"],
+                 [[r["id"], _sev(r["sev"]), _live(vfy.liveness_of(r)), _cut(_waf_cell(r), 14),
+                   _cut(r["title"], 32), _cut(r["asset"], 20), _cut(r["endpoint"] or "-", 20),
                    _cut(_level_of(dict(r)), 12), r["count"], _cut(r["status"], 8)] for r in rows],
-                 [5, 8, 12, 36, 24, 28, 12, 4, 8]))
+                 [5, 8, 12, 14, 32, 20, 20, 12, 4, 8]))
     tail = (f"\n共 {data['total']} 条（显示 {len(rows)}）　详情 {_c('kara list -i <ID>', '36')}"
             f"　导出 {_c('kara list --csv out.csv', '36')}")
     if liveness == "UNVERIFIED":
         tail += f"\n复验这批：{_c('kara verify --liveness unverified', '36')}"
+    if not waf:
+        tail += f"\n只看被拦：{_c('kara list --waf blocked', '36')}"
     print(tail)
     return 0
 
@@ -495,6 +569,12 @@ def _show_one(ctx: Ctx, row_id: int) -> int:
     print(f"  时间　　{r.get('first_seen')} → {r.get('last_seen')}")
     if r.get("evidence"):
         print(f"  判据　　{_cut(r['evidence'], 400)}")
+    if r.get("waf_state"):
+        # 三态单独一行：这一条到底是「扫到过」还是「只被拦过」，看这一行
+        who = f"（{r['waf']}）" if r.get("waf") else ""
+        print(f"  WAF　　 {wafmod.label(r['waf_state'])}{who}　"
+              + ("被拦 ≠ 不存在：换出口/降速后重测再下结论"
+                 if r["waf_state"] == wafmod.BLOCKED else ""))
     if r.get("repro"):
         print(f"  复现　　{_c(str(r['repro']), '36')}")
     print(f"  产物　　{r.get('files') or '-'}")
@@ -569,7 +649,7 @@ def cmd_verify(ctx: Ctx, args: argparse.Namespace) -> int:
     print(f"{_c('[kara]', '36')} 复验完成　" + "　".join(f"{k} {n}" for k, n in summary.items() if n))
     for item in (st.get("last") or [])[:20]:
         print(f"  #{item.get('id')} {item.get('state')} {_cut(item.get('title') or '', 40)} "
-              f"{_cut(item.get('note') or '', 40)}")
+              f"{_cut(item.get('note') or '', 64)}")
     return 0
 
 
@@ -654,6 +734,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--status", default="", help="待验证 / 已确认 / 误报 / 已修复 / 已忽略")
     p.add_argument("--liveness", default="", metavar="STATE",
                    help="存活状态：alive / dead / unverified / unknown / na")
+    p.add_argument("--waf", default="", metavar="STATE",
+                   help="WAF 三态：blocked（被拦）/ absent（真不存在）/ unknown（不确定）/ present")
     p.add_argument("--q", default="", help="关键词")
     p.add_argument("--limit", type=int, default=50)
     p.add_argument("--csv", default="", help="导出 CSV 到该文件")

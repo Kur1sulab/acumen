@@ -18,6 +18,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from .parsers import ParseResult, _mk_asset, _mk_finding, norm_sev
+from . import waf as wafmod
 
 # ---------------------------------------------------------------- 形状识别
 
@@ -344,6 +345,11 @@ def parse_paths(obj: Dict[str, Any], host: str) -> ParseResult:
         h, port = split_host_port(host)
         assets.append(_mk_asset(host=h, port=port, source="sweep-paths"))
     note = f"存活 {len(alive)} 条" if alive else "没有存活路径（基线过滤后为 0）"
+    v = wafmod.classify_doc(obj)
+    if not alive and v["state"] in (wafmod.BLOCKED, wafmod.UNKNOWN):
+        # 「0 命中」不等于「都不存在」——这一句必须写进产物说明里。
+        # 不写的话，报告上的「没有存活路径」就会被人当成「这些路径都没东西」。
+        note = f"{note}；{wafmod.note(v)}，0 命中不代表这些路径不存在"
     return ParseResult("sweep_paths", findings, assets, note=note)
 
 
@@ -567,6 +573,14 @@ def parse(text: str, path: str = "") -> Optional[ParseResult]:
             continue
         hit += 1
         r = fn(obj, host)
+        # WAF 三态跟着产物走：每份产物先判一次「这轮到底拿到内容没有」，再贴到它产出的
+        # 每条命中上。贴在这个汇合点而不是各 parse_* 里，是因为十几种产物形状只在这里
+        # 归一——漏一个模式，就漏掉一整类「被拦当不存在」。
+        if isinstance(obj, dict):
+            v = wafmod.classify_doc(obj)
+            for f in r.findings:
+                f.setdefault("waf_state", v["state"])
+                f.setdefault("waf", v["waf"])
         # 把引擎自己记下的 base 挂到每条命中上：复验要按原样的 scheme/host/port 重跑，
         # 光靠 asset+port 反推会把 http 目标猜成 https，重跑必然空手而归（假「已消失」）。
         base = str(obj.get("base") or "").strip() if isinstance(obj, dict) else ""
