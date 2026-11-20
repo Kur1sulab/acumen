@@ -257,13 +257,14 @@ class TestOutputHygiene(unittest.TestCase):
     def test_alignment_non_tty(self):
         _, out, _ = run("--db", self.db, "list")
         widths = {cli._w(l) for l in self._table_lines(out)}
-        self.assertEqual(widths, {153})   # 5+8+12+14+32+20+20+12+4+8 + 9×2 间隔（WAF 列占 14）
+        # 5+8+12+6+14+32+20+20+12+4+8 + 10×2 间隔（v1.10.0 加「三层」列占 6）
+        self.assertEqual(widths, {161})
 
     def test_alignment_tty(self):
         with mock.patch.object(cli, "_tty", return_value=True):
             _, out, _ = run("--db", self.db, "list")
         widths = {cli._w(l) for l in self._table_lines(out)}
-        self.assertEqual(widths, {153})
+        self.assertEqual(widths, {161})
 
     def test_cjk_titles_align(self):
         db = os.path.join(self.tmp, "cjk.db")

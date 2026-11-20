@@ -30,6 +30,37 @@ SEV_ORDER = ("critical", "high", "medium", "low", "info")
 STATUS_CHOICES = ("待验证", "已确认", "误报", "已修复", "已忽略")
 
 
+def _pipe_badge(row: Any) -> str:
+    """三层通过度（导出用）：与 CLI 的「三层」列同一口径（分母=适用层数）。"""
+    try:
+        state = str(row["pipe_state"] or "")
+        blob = str(row["pipe_layers"] or "")
+    except (KeyError, IndexError, TypeError):
+        return "—"
+    if state == "downgraded":
+        return "⚠降级"
+    if not state:
+        return "—"
+    try:
+        layers = json.loads(blob) if blob else {}
+    except ValueError:
+        layers = {}
+    app = [n for n in ("L1", "L2", "L3")
+           if isinstance(layers.get(n), dict) and (layers[n].get("state") or "skip") != "skip"]
+    if not app:
+        return "?"
+    ok = [n for n in app if layers[n].get("state") == "pass"]
+    sym = {"verified": "✓", "refuted": "✗", "uncertain": "?"}.get(state, "?")
+    return f"{sym}{len(ok)}/{len(app)}"
+
+
+def _pipe_label(row: Any) -> str:
+    try:
+        return str(row["pipe_reason"] or "")[:80]
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
 def _key(*parts: str) -> str:
     raw = "|".join((p or "").strip().lower() for p in parts)
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
@@ -81,12 +112,31 @@ class Store:
                              # WAF 三态：blocked/absent/unknown/present。
                              # 「被拦」不许计成「已确认不存在」，所以状态要和 404 分开存。
                              ("waf_state", "TEXT DEFAULT ''"),
-                             ("waf", "TEXT DEFAULT ''")):
+                             ("waf", "TEXT DEFAULT ''"),
+                             # v1.10.0：三层复验流水线结论 + 误报反馈闭环。
+                             # pipe_state 记流水线自己跑出来的结论，fb_state 记人的判断——
+                             # 两者必须分字段：机器跑的和人判的混在一起，就再也说不清
+                             # 「这条到底是谁说它是误报」。
+                             ("pipe_state", "TEXT DEFAULT ''"),
+                             ("pipe_pass", "INTEGER DEFAULT 0"),
+                             ("pipe_layers", "TEXT DEFAULT ''"),
+                             ("pipe_reason", "TEXT DEFAULT ''"),
+                             ("pipe_poc", "TEXT DEFAULT ''"),
+                             ("pipe_at", "TEXT DEFAULT ''"),
+                             ("fb_state", "TEXT DEFAULT ''"),
+                             ("fb_at", "TEXT DEFAULT ''")):
                 if col not in cols:
                     self.conn.execute(f"ALTER TABLE findings ADD COLUMN {col} {ddl}")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_f_cve ON findings(cve)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_f_vfy ON findings(verify_state)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_f_waf ON findings(waf_state)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_f_pipe ON findings(pipe_state)")
+            self.conn.execute("""CREATE TABLE IF NOT EXISTS feedback(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                host TEXT DEFAULT '', rule TEXT DEFAULT '', param TEXT DEFAULT '',
+                verdict TEXT DEFAULT '', note TEXT DEFAULT '', source TEXT DEFAULT '',
+                at TEXT DEFAULT '', times INTEGER DEFAULT 1,
+                UNIQUE(host, rule, param))""")
             self.conn.commit()
 
     # ------------------------------------------------------------ schema
@@ -109,11 +159,24 @@ class Store:
                     verify_state TEXT DEFAULT '', verify_at TEXT DEFAULT '',
                     verify_times INTEGER DEFAULT 0, verify_note TEXT DEFAULT '',
                     base TEXT DEFAULT '',
-                    waf_state TEXT DEFAULT '', waf TEXT DEFAULT ''
+                    waf_state TEXT DEFAULT '', waf TEXT DEFAULT '',
+                    pipe_state TEXT DEFAULT '', pipe_pass INTEGER DEFAULT 0,
+                    pipe_layers TEXT DEFAULT '', pipe_reason TEXT DEFAULT '',
+                    pipe_poc TEXT DEFAULT '', pipe_at TEXT DEFAULT '',
+                    fb_state TEXT DEFAULT '', fb_at TEXT DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS idx_f_sev   ON findings(sev_rank DESC);
                 CREATE INDEX IF NOT EXISTS idx_f_asset ON findings(asset);
                 CREATE INDEX IF NOT EXISTS idx_f_stat  ON findings(status);
+
+                -- 新表的索引建在 _migrate 里：老库的 findings 上还没有 pipe_state 列，
+                -- 在这里建索引会让「打开老库」直接报 no such column（升级即炸）。
+                CREATE TABLE IF NOT EXISTS feedback(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    host TEXT DEFAULT '', rule TEXT DEFAULT '', param TEXT DEFAULT '',
+                    verdict TEXT DEFAULT '', note TEXT DEFAULT '', source TEXT DEFAULT '',
+                    at TEXT DEFAULT '', times INTEGER DEFAULT 1,
+                    UNIQUE(host, rule, param));
 
                 CREATE TABLE IF NOT EXISTS assets(
                     host TEXT PRIMARY KEY,
@@ -311,6 +374,10 @@ class Store:
             by_waf = [dict(r) for r in self.conn.execute(
                 "SELECT waf_state, COUNT(*) n FROM findings WHERE waf_state<>'' "
                 "GROUP BY waf_state").fetchall()]
+            # 三层流水线分布：抬头要能说清「这个库里有多少条真的三层全过」
+            by_pipe = [dict(r) for r in self.conn.execute(
+                "SELECT pipe_state, COUNT(*) n FROM findings WHERE pipe_state<>'' "
+                "GROUP BY pipe_state").fetchall()]
         by_verify = self.verify_stats()   # 锁是 RLock，放在 with 外面只为读着清楚
         sev_counts = {s: 0 for s in SEV_ORDER}
         hits = {s: 0 for s in SEV_ORDER}
@@ -329,6 +396,7 @@ class Store:
             "by_status": by_status,
             "by_verify": by_verify,
             "by_waf": by_waf,
+            "by_pipeline": by_pipe,
             "repro": repro_n or 0,
             "top_assets": top_assets,
             "by_type": by_type,
@@ -338,7 +406,7 @@ class Store:
 
     @staticmethod
     def _filter(sev: str = "", status: str = "", q: str = "", asset: str = "",
-                liveness: str = "", waf: str = "") -> Tuple[str, List[Any]]:
+                liveness: str = "", waf: str = "", pipeline: str = "") -> Tuple[str, List[Any]]:
         """筛选子句：列表页与导出共用同一套条件，保证「导出的就是你看到的」。"""
         where: List[str] = []
         args: List[Any] = []
@@ -348,6 +416,21 @@ class Store:
         if status:
             where.append("status=?")
             args.append(status)
+        if pipeline:
+            # 三层流水线筛选。和 liveness 同一套纪律：认不出的取值直接抛，
+            # 静默忽略会让人把「筛出来是空的」读成「库里没有」。
+            token = str(pipeline).strip().lower()
+            if token in ("unrun", "none", "pending"):
+                where.append("(pipe_state IS NULL OR pipe_state='')")
+            elif token in ("verified", "refuted", "uncertain", "downgraded"):
+                where.append("pipe_state=?")
+                args.append(token)
+            elif token in ("pass", "all3", "3/3"):
+                where.append("pipe_state='verified'")
+            elif token in ("partial", "1/3", "2/3"):
+                where.append("pipe_state IN ('uncertain','refuted') AND pipe_pass>0")
+            else:
+                raise ValueError(f"未知三层状态：{pipeline}（可选 verified/refuted/uncertain/downgraded/unrun）")
         if liveness:
             # 存活状态从 verify_state 翻译而来（唯一真相源，见 verify.liveness_of）。
             # UNVERIFIED = 从没写过复验结论；老库迁移行可能是 NULL，一并算上。
@@ -374,8 +457,9 @@ class Store:
 
     def findings(self, sev: str = "", asset: str = "", status: str = "", q: str = "",
                  limit: int = 200, offset: int = 0, liveness: str = "",
-                 waf: str = "") -> Dict[str, Any]:
-        clause, args = self._filter(sev, status, q, asset, liveness=liveness, waf=waf)
+                 waf: str = "", pipeline: str = "") -> Dict[str, Any]:
+        clause, args = self._filter(sev, status, q, asset, liveness=liveness, waf=waf,
+                                    pipeline=pipeline)
         with self.lock:
             total = self.conn.execute(f"SELECT COUNT(*) c FROM findings {clause}", args).fetchone()["c"]
             rows = self.conn.execute(
@@ -555,15 +639,129 @@ class Store:
             self.conn.commit()
             return cur.rowcount or 0
 
+    # ------------------------------------------------------------ 三层流水线 + 误报反馈（v1.10.0）
+
+    def set_pipeline(self, updates: List[Dict[str, Any]]) -> int:
+        """写三层流水线结论：结论 + 通过层数 + 每层理由 + 最小 PoC + 时间。
+
+        为什么和 set_verify 分开：verify_state 是「还活着吗」的四态（给 list 的存活列），
+        pipe_state 是「三层过没过」（给误报闭环）。同一件事的两种投影，一个字段装不下，
+        硬塞会让「已消失」和「判为误报」再也分不开。
+        """
+        if not updates:
+            return 0
+        ts = _now()
+        n = 0
+        with self.lock:
+            for u in updates:
+                layers = u.get("layers") or {}
+                try:
+                    blob = json.dumps(layers, ensure_ascii=False)[:8000]
+                except (TypeError, ValueError):
+                    blob = ""
+                cur = self.conn.execute(
+                    "UPDATE findings SET pipe_state=?, pipe_pass=?, pipe_layers=?, pipe_reason=?, "
+                    "pipe_poc=?, pipe_at=? WHERE id=?",
+                    (str(u.get("state") or "")[:20], int(u.get("pass") or 0), blob,
+                     str(u.get("reason") or "")[:600], str(u.get("poc") or "")[:600],
+                     ts, int(u["id"])))
+                n += cur.rowcount
+            self.conn.commit()
+        return n
+
+    def pipeline_stats(self) -> List[Dict[str, Any]]:
+        with self.lock:
+            return [dict(r) for r in self.conn.execute(
+                "SELECT pipe_state, COUNT(*) n FROM findings WHERE pipe_state<>'' "
+                "GROUP BY pipe_state").fetchall()]
+
+    def add_feedback(self, host: str, rule: str, param: str, verdict: str,
+                     note: str = "", source: str = "cli") -> int:
+        """记一条人工判定，按 (host, rule, param) 累积次数。
+
+        累积而不是覆盖：同一条规则被同一个人判了三次误报，和只判过一次，
+        下次再命中时的分量不一样——次数是这条历史唯一的强度信息。
+        """
+        host, rule, param = str(host or ""), str(rule or ""), str(param or "")
+        ts = _now()
+        with self.lock:
+            self.conn.execute(
+                """INSERT INTO feedback(host, rule, param, verdict, note, source, at, times)
+                   VALUES(?,?,?,?,?,?,?,1)
+                   ON CONFLICT(host, rule, param) DO UPDATE SET
+                     verdict=excluded.verdict, note=excluded.note,
+                     source=excluded.source, at=excluded.at, times=times+1""",
+                (host, rule, param, str(verdict or "")[:20], str(note or "")[:300],
+                 str(source or "")[:20], ts))
+            self.conn.commit()
+            row = self.conn.execute(
+                "SELECT times FROM feedback WHERE host=? AND rule=? AND param=?",
+                (host, rule, param)).fetchone()
+        return int(row["times"] if row else 1)
+
+    def feedback_for(self, host: str, rule: str, param: str) -> Dict[str, Any]:
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT * FROM feedback WHERE host=? AND rule=? AND param=?",
+                (str(host or ""), str(rule or ""), str(param or ""))).fetchone()
+        return dict(row) if row else {}
+
+    def feedback_rows(self, limit: int = 200) -> List[Dict[str, Any]]:
+        with self.lock:
+            return [dict(r) for r in self.conn.execute(
+                "SELECT * FROM feedback ORDER BY at DESC, id DESC LIMIT ?", (int(limit),)).fetchall()]
+
+    def apply_history(self, since: str = "") -> Dict[str, int]:
+        """把历史人工结论落到「还没跑过流水线」的命中上。
+
+        时机：扫描入账之后。作用：人标过误报的 (host, rule, param) 再次命中时，
+        条目不静默消失（那是隐瞒），也不照旧报高危（那是无视人的判断）——
+        标成 downgraded 并把「历史人工判误报」写在理由里，等下一次 verify 复核。
+
+        since：只处理这一轮扫描碰过的行（last_seen 不早于该时刻）。入库时传扫描开始时间，
+        库再大也只扫这一批；不传就是全库回填。
+        """
+        from . import pipeline as pipemod      # 局部 import：store 不参与 pipeline 的判定逻辑
+
+        with self.lock:
+            fb = {(r["host"], r["rule"], r["param"]): dict(r)
+                  for r in self.conn.execute("SELECT * FROM feedback").fetchall()}
+            if not fb:
+                return {"marked": 0, "scanned": 0}
+            sql = ("SELECT id, asset, param, title, pipe_state, last_seen FROM findings "
+                   "WHERE (pipe_state IS NULL OR pipe_state='')")
+            args: List[Any] = []
+            if since:
+                sql += " AND last_seen >= ?"
+                args.append(since)
+            rows = [dict(r) for r in self.conn.execute(sql, args).fetchall()]
+        marked = 0
+        ts = _now()
+        with self.lock:
+            for r in rows:
+                hit = fb.get((str(r.get("asset") or ""), pipemod.rule_of(r), str(r.get("param") or "")))
+                if not hit or pipemod.norm_human(hit.get("verdict")) != pipemod.REFUTED:
+                    continue
+                times = int(hit.get("times") or 1)
+                note = (f"历史人工判误报（{times} 次，{hit.get('at') or '时间未知'}）"
+                        f"：本次扫描再次命中，降级待复核" + (f"；人工备注：{hit['note']}" if hit.get("note") else ""))
+                self.conn.execute(
+                    "UPDATE findings SET pipe_state=?, pipe_pass=0, pipe_reason=?, pipe_at=? WHERE id=?",
+                    (pipemod.DOWNGRADED, note[:600], ts, int(r["id"])))
+                marked += 1
+            self.conn.commit()
+        return {"marked": marked, "scanned": len(rows)}
+
     # ------------------------------------------------------------ 导出
 
     def export_csv(self, sev: str = "", status: str = "", q: str = "",
-                   liveness: str = "", waf: str = "") -> str:
+                   liveness: str = "", waf: str = "", pipeline: str = "") -> str:
         buf = io.StringIO()
         w = csv.writer(buf)
         w.writerow(["严重度", "漏洞名称", "资产", "IP", "端口", "端点", "参数", "命中次数", "来源", "状态",
-                    "存活", "复验", "复验时间", "首次发现", "最近发现", "证据", "复现命令", "WAF 三态"])
-        clause, args = self._filter(sev, status, q, liveness=liveness, waf=waf)
+                    "存活", "复验", "复验时间", "首次发现", "最近发现", "证据", "复现命令", "WAF 三态",
+                    "三层", "三层结论", "最小复现"])
+        clause, args = self._filter(sev, status, q, liveness=liveness, waf=waf, pipeline=pipeline)
         with self.lock:
             rows = self.conn.execute(
                 f"SELECT * FROM findings {clause} ORDER BY sev_rank DESC, count DESC, asset", args).fetchall()
@@ -572,11 +770,12 @@ class Store:
             w.writerow([r["sev"], r["title"], r["asset"], r["ip"], r["port"], r["endpoint"], r["param"],
                         r["count"], r["sources"], r["status"], liveness_of(r), r["verify_state"], r["verify_at"],
                         r["first_seen"], r["last_seen"], r["evidence"], r["repro"],
-                        wafmod.label(r["waf_state"] or "") or "未判定"])
+                        wafmod.label(r["waf_state"] or "") or "未判定",
+                        _pipe_badge(r), _pipe_label(r), r["pipe_poc"] or ""])
         return buf.getvalue()
 
     def export_md(self, sev: str = "", status: str = "", q: str = "",
-                  liveness: str = "", waf: str = "") -> str:
+                  liveness: str = "", waf: str = "", pipeline: str = "") -> str:
         s = self.summary()
         lines = [f"# 漏扫结果整理（{s['generated_at']}）", ""]
         lines.append(f"- 发现条目：**{s['findings']}**（累计命中 {s['hits']} 次）")
@@ -592,10 +791,15 @@ class Store:
         if wf:
             # 三态要出现在报告抬头：被拦的那批不计入「确认不存在」，读者得先知道有多少条
             lines.append("- WAF 三态：" + " / ".join(f"{k} {v}" for k, v in wf.items()))
-        lines += ["", "## 漏洞清单", "",
-                  "| 严重度 | 漏洞 | 资产 | 端点 | 命中 | 来源 | 状态 | 复验 | WAF |",
-                  "|---|---|---|---|---|---|---|---|---|"]
-        clause, args = self._filter(sev, status, q, liveness=liveness, waf=waf)
+        lines += [""]
+        pipe = {r["pipe_state"]: r["n"] for r in (s.get("by_pipeline") or []) if r.get("pipe_state")}
+        if pipe:
+            lines.append("- 三层：" + " / ".join(f"{k} {v}" for k, v in pipe.items()))
+            lines += [""]
+        lines += ["## 漏洞清单", "",
+                  "| 严重度 | 漏洞 | 资产 | 端点 | 命中 | 来源 | 状态 | 复验 | WAF | 三层 |",
+                  "|---|---|---|---|---|---|---|---|---|---|"]
+        clause, args = self._filter(sev, status, q, liveness=liveness, waf=waf, pipeline=pipeline)
         with self.lock:
             rows = self.conn.execute(
                 f"SELECT * FROM findings {clause} ORDER BY sev_rank DESC, count DESC LIMIT 500",
@@ -604,7 +808,7 @@ class Store:
             ep = (r["endpoint"] or "").replace("|", "\\|")
             lines.append(f"| {r['sev']} | {r['title']} | {r['asset']} | {ep} | {r['count']} | "
                          f"{r['sources']} | {r['status']} | {r['verify_state'] or '未复验'} | "
-                         f"{wafmod.label(r['waf_state'] or '') or '未判定'} |")
+                         f"{wafmod.label(r['waf_state'] or '') or '未判定'} | {_pipe_badge(r)} |")
         repro = [r for r in rows if (r["repro"] or "").strip()]
         if repro:
             # 复现材料单独列出来：报告里能直接粘的那一段，比表格有用

@@ -52,6 +52,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import parsers_sweep as ps
+from . import pipeline as pipemod
 from . import waf as wafmod
 
 # 来源标签 → 引擎子命令。只有本机引擎跑出来的条目才谈得上复验。
@@ -552,3 +553,128 @@ class Verifier:
         finally:
             self._progress(running=False, finished=time.time(), current="", summary=summary,
                            last=last[-20:])
+
+
+# ------------------------------------------------------------ 三层流水线（v1.10.0，总纲 4.2）
+
+# 流水线结论 → 存活四态。两个字段是同一件事的两个投影，映射必须写死在一处：
+# 确认过的才叫「仍存在」；判为误报的叫「已消失」（它本来就不是命中）；
+# 存疑的一律「无法判定」——不许因为「没确认」就顺手写成「没了」。
+PIPE_TO_VERIFY = {pipemod.VERIFIED: STILL, pipemod.REFUTED: GONE,
+                  pipemod.UNCERTAIN: UNKNOWN}
+
+
+def pipeline_of(row: Any) -> Dict[str, Any]:
+    """从库里存的 pipe_* 字段还原一份「三层结论」，形状与 pipeline.verify() 一致。
+
+    list -i / 导出都读它，不重跑：看结论不该再打目标一枪。
+    """
+    def get(k: str, default: str = "") -> str:
+        try:
+            return str(row[k] or default)
+        except (KeyError, IndexError, TypeError):
+            return default
+
+    try:
+        layers = json.loads(get("pipe_layers") or "{}")
+    except ValueError:
+        layers = {}
+    if not isinstance(layers, dict):
+        layers = {}
+    state = get("pipe_state")
+    return {
+        "verdict": state,
+        "reason": get("pipe_reason"),
+        "layers": layers,
+        "minimal_curl": get("pipe_poc"),
+        "pass_count": int(get("pipe_pass") or 0),
+        "ran_count": sum(1 for v in layers.values()
+                         if isinstance(v, dict) and v.get("state") not in (None, "", "skip")),
+    }
+
+
+def has_layers(row: Any) -> bool:
+    try:
+        return bool(str(row["pipe_state"] or "").strip())
+    except (KeyError, IndexError, TypeError):
+        return False
+
+
+def run_layers(store, rows: List[Dict[str, Any]], engine: str = "", timeout: int = 10,
+               prober=None, on_row=None) -> List[Dict[str, Any]]:
+    """对一批命中跑三层流水线，结论落库（pipe_* + verify_state 同步）。
+
+    每条命中独立判定、独立落库：中途崩一条不能把整批的结论带走。
+    prober 可注入（测试用）；不给就用引擎的 replay 子命令。
+    """
+    from . import probe as probe_mod
+
+    own = prober is None
+    if own:
+        prober = probe_mod.EngineProber(engine, timeout=timeout)
+    out: List[Dict[str, Any]] = []
+    try:
+        for row in rows:
+            r = dict(row)
+            fid = int(r.get("id") or 0)
+            hist = {}
+            if fid and store is not None:
+                hist = store.feedback_for(r.get("asset") or "", pipemod.rule_of(r),
+                                          r.get("param") or "")
+            try:
+                res = pipemod.verify(r, prober, history=hist or None)
+            except Exception as exc:                      # noqa: BLE001
+                # 判定本身崩了：记「没跑成」，绝不猜结论
+                res = {"verdict": pipemod.UNCERTAIN, "reason": f"流水线异常：{type(exc).__name__}: {exc}",
+                       "layers": {}, "minimal_curl": "", "pass_count": 0, "ran_count": 0}
+            if fid and store is not None:
+                state = res["verdict"]
+                hist_now = pipemod.history_of(r, hist)
+                if hist_now.get("verdict") == pipemod.REFUTED and state == pipemod.UNCERTAIN:
+                    # 历史人工判过误报、这次也没能三层全过：落库标成「降级」，
+                    # 列表上一眼能看出这条是「人说过是误报，机器这次也确认不了」。
+                    state = pipemod.DOWNGRADED
+                store.set_pipeline([{
+                    "id": fid, "state": state, "pass": res["pass_count"],
+                    "layers": res["layers"], "reason": res["reason"], "poc": res["minimal_curl"]}])
+                store.set_verify([(fid, PIPE_TO_VERIFY.get(res["verdict"], UNKNOWN), res["reason"])])
+            out.append({"id": fid, "row": r, "result": res})
+            if on_row:
+                on_row(r, res)
+    finally:
+        if own:
+            prober.close()
+    return out
+
+
+def apply_history(store, since: str = "") -> Dict[str, int]:
+    """扫描之后把历史人工结论落到新命中的行上（降级 + 注明，不丢弃）。"""
+    try:
+        return store.apply_history(since=since)
+    except Exception:                                     # noqa: BLE001
+        return {"marked": 0, "scanned": 0}
+
+
+def feedback(store, row: Any, verdict: str, note: str = "") -> Dict[str, Any]:
+    """人工回写判定：累加到 feedback 表，并在该条上留痕。
+
+    「人判的」和「机器跑的」分字段存：pipe_state 不动，fb_state 记人。
+    下一次同 (host, rule, param) 再命中时，这条历史会参与判定（降级）。
+    """
+    v = pipemod.norm_human(verdict)
+    if not v:
+        return {"ok": False, "error": f"认不出的判定：{verdict}（用 误报/false-positive 或 真报/true-positive）"}
+    host = str(row.get("asset") or "")
+    rule = pipemod.rule_of(row)
+    param = str(row.get("param") or "")
+    times = store.add_feedback(host, rule, param, v, note)
+    try:
+        fid = int(row.get("id") or 0)
+        if fid:
+            with store.lock:
+                store.conn.execute("UPDATE findings SET fb_state=?, fb_at=? WHERE id=?",
+                                   (v, time.strftime("%Y-%m-%d %H:%M:%S"), fid))
+                store.conn.commit()
+    except Exception:                                     # noqa: BLE001
+        pass
+    return {"ok": True, "verdict": v, "host": host, "rule": rule, "param": param, "times": times}

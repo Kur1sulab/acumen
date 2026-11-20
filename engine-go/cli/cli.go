@@ -24,6 +24,7 @@ import (
 	"github.com/Kur1sulab/kara/engine-go/patchdiff"
 	"github.com/Kur1sulab/kara/engine-go/paths"
 	"github.com/Kur1sulab/kara/engine-go/poc"
+	"github.com/Kur1sulab/kara/engine-go/replay"
 	"github.com/Kur1sulab/kara/engine-go/report"
 	"github.com/Kur1sulab/kara/engine-go/subdomain"
 )
@@ -45,6 +46,8 @@ const helpText = `sweep — 空境 Kara 的扫描内核（Go 单文件；断网/
   sweep baseline -d example.com [--checks secheaders,webfiles,sslchain]  # 暴露面基线 3 检查（只打目标）
   sweep strike -t http://example.com [--intensity normal] [--ports top100]  # 深度验证（真发请求）
   sweep poc -t https://example.com -p pocs/example.yaml  # YAML POC 引擎
+  sweep replay -u http://127.0.0.1:8080/ok [--data 'a=1'] [--header 'K: V'] [--no-redirect]
+                                         # 单次精确请求 → replay.json（复验流水线传输层，不探测）
   sweep patchdiff -r /path/to/repo [--commit SHA|--range A..B] [--limit N] [--emit-rule f.yaml]
                                          # 补丁差分 → 变种狩猎（本地 git 仓库，零外联）
   sweep report -t example.com          # 资产档案 + 证据包
@@ -77,9 +80,10 @@ var knownCmds = map[string]bool{
 	"api": true, "fingerprint": true, "paths": true, "jsintel": true,
 	"portscan": true, "poc": true, "patchdiff": true, "report": true,
 	"baseline": true, // 域名暴露面基线（report §5.9；桌面第二子进程，非 Python yata.py 对齐项）
-	"strike": true,   // 深度验证（内建 litmus 内核，非只读模式的延伸）
-	"brute":  true,   // 弱口令验证（协议握手，命中即停）
-	"cve":    true,   // 离线 CVE 版本匹配
+	"strike":   true, // 深度验证（内建 litmus 内核，非只读模式的延伸）
+	"brute":    true, // 弱口令验证（协议握手，命中即停）
+	"cve":      true, // 离线 CVE 版本匹配
+	"replay":   true, // 单次精确 HTTP 请求 → replay.json（Python 三层复验流水线的传输层）
 	"version":  true, // 版本自省（Go 侧独有，Python yata.py 无对应子命令）
 }
 
@@ -145,7 +149,7 @@ func Run(args []string) int {
 
 func dispatch(cmd string, rest []string) int {
 	switch cmd {
-		case "subdomain": // 本地 DNS 字典爆破（断网可用；不查任何证书日志服务）
+	case "subdomain": // 本地 DNS 字典爆破（断网可用；不查任何证书日志服务）
 		fs := newFlagSet()
 		d := fs.String("d", "", "")
 		dAlias := fs.String("domain", "", "")
@@ -195,7 +199,7 @@ func dispatch(cmd string, rest []string) int {
 		}
 		return 0
 
-		case "verify":
+	case "verify":
 		fs := newFlagSet()
 		domain := fs.String("d", "", "")
 		domainAlias := fs.String("domain", "", "")
@@ -287,6 +291,52 @@ func dispatch(cmd string, rest []string) int {
 		if _, err := paths.RunPaths(url, out, extra...); err != nil {
 			return 1 // fix3：写盘失败 → fail 事件 + exit 1
 		}
+		return 0
+
+	case "replay": // 单次精确请求 → out/<host>/replay.json（Python 三层复验流水线的传输层）
+		fs := newFlagSet()
+		u := fs.String("u", "", "")
+		uAlias := fs.String("url", "", "")
+		m := fs.String("m", "GET", "HTTP 方法（默认 GET；给了 --data 也不自动改 POST）")
+		mAlias := fs.String("method", "GET", "HTTP 方法（同 -m）")
+		data := fs.String("data", "", "请求体（原样发送，不做表单编码）")
+		var hdrs stringListFlag
+		fs.Var(&hdrs, "header", "附加请求头，形如 'K: V'（可重复；键 Host 改写 req.Host）")
+		timeoutSec := fs.Int("timeout", replay.DefaultTimeout, "整次请求超时（秒）")
+		noRedirect := fs.Bool("no-redirect", false, "不跟随重定向（返回 3xx 响应本身）")
+		o := fs.String("o", "", "输出目录（默认 out/<host>/）")
+		oAlias := fs.String("out", "", "输出目录（同 -o）")
+		const usage = "replay -u <url> [-m GET] [--data ...] [--header 'K: V'] [--timeout 10] [--no-redirect] [-o <dir>]"
+		if c := parseOrUsage(fs, rest, cmd, usage); c != -1 {
+			return c
+		}
+		url := pickAliasLastWins(rest, map[string]*string{"-u": u, "--url": uAlias})
+		if strings.TrimSpace(url) == "" {
+			return missingArgs(cmd, usage)
+		}
+		method := pickAliasLastWins(rest, map[string]*string{"-m": m, "--method": mAlias})
+		if strings.TrimSpace(method) == "" {
+			method = "GET" // 两别名都没出现时 pickAliasLastWins 回空串，落回默认
+		}
+		outDir := strings.TrimSpace(pickAliasLastWins(rest, map[string]*string{"-o": o, "--out": oAlias}))
+		if outDir == "" {
+			// 默认 out/<host>/：HostOf 保留端口，MakeOutdir 负责目录名清洗
+			base, err := MakeOutdir(replay.HostOf(url))
+			if err != nil {
+				fmt.Printf("[!] 输出目录创建失败: %v\n", err)
+				return 1
+			}
+			outDir = base
+		}
+		if err := replay.Run(url, method, *data, hdrs, *timeoutSec, !*noRedirect, outDir); err != nil {
+			fmt.Printf("[!] replay: %v\n", err)
+			if errors.Is(err, replay.ErrBadArgs) {
+				return 2 // 参数错：URL 非法 / 头格式错 / timeout 非正
+			}
+			return 1 // 产物写不下去
+		}
+		// 传输层失败（status=0）也走这里：产物照写、exit 0，结论看 JSON
+		fmt.Printf("[+] replay -> %s\n", replay.Path(outDir))
 		return 0
 
 	case "strike": // 深度验证：内建 litmus 内核，产物 out/<target>/strike/ 由 Kara 解析入账
@@ -623,6 +673,18 @@ func newFlagSet() *flag.FlagSet {
 type discard struct{}
 
 func (discard) Write(p []byte) (int, error) { return len(p), nil }
+
+// stringListFlag 可重复的字符串旗标（--header 'K: V' --header 'K2: V2'）。
+// flag 包对同一 Var 的多次出现按命令行顺序回调 Set，正好对上「多值按序发送」
+// 的语义；String() 只用于 PrintDefaults，不影响发送顺序。
+type stringListFlag []string
+
+func (s *stringListFlag) String() string { return strings.Join(*s, ", ") }
+
+func (s *stringListFlag) Set(v string) error {
+	*s = append(*s, v)
+	return nil
+}
 
 func parseOrUsage(fs *flag.FlagSet, args []string, cmd, usage string) int {
 	err := fs.Parse(args)

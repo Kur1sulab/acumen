@@ -3,6 +3,59 @@
 版本号按 [语义化版本](https://semver.org/lang/zh-CN/)：修 bug 走 patch，加能力走 minor，
 输出格式或数据库结构不兼容才走 major。
 
+## 1.10.0 — 2026-11-21
+
+### 新增 · 4.2 三层复验流水线 + 误报反馈闭环
+
+原来的复验是**单层判定**：重跑同一个扫描模式，看同标题的命中还在不在。它拿不到响应体，
+所以下面四种形状在它眼里一模一样，全部记成「仍存在」：**真命中** / **全站 500**（打什么都是
+同一张错误页）/ **WAF 拦截页**（403 拦截页）/ **payload 根本没进业务**（静态同形）。反过来，
+被 WAF 拦住的那批又会被记成「已消失」——同一个根（没有上下文对照）长出四条假漏洞和一堆漏报。
+
+- 三层各自回答一个问题，**任一层不通过就不算确认**：
+  - **L1 命中复核**（`vc/pipeline.py:layer1`）：原请求重放两次 + 无辜对照（同位置换无害值；
+    路径类命中用同目录随机路径）。全站 5xx（与对照同一张错误页）、静态同形（与对照完全一致）、
+    偶发 5xx（首次 500、重放 200）判 `fail`；命中落在 WAF 拦截页判 `blocked`——
+    **拦截页不能拿来否定命中**，所以判定顺序是 blocked 先于「与对照一致」。
+  - **L2 上下文复核**（`layer2`）：同位置换无害值（现象照旧 = 现象不是 payload 造成的）；
+    payload 换到另一个参数名/位置重放（现象不变 = 通用 sink，照样算命中，理由里写明；
+    现象随参数变化也写清楚）；SQLi 另做布尔对照 `1=1` vs `1=2`，两边响应一致 = 布尔差异不成立 → `fail`。
+    报错型注入（orig 已 5xx）**跳过**布尔对照：两侧都会 500，比值没有判别力，硬比会把真注入判成误报。
+  - **L3 最小化 PoC**（`layer3`）：剥掉无关参数只留 payload 再打一次，现象还在就产出最小 `curl` 串；
+    剥完现象消失 → `unstable`（结论依赖被剥掉的部分，给不出最小复现串，不硬凑）。
+- 层状态词表 `pass / fail / unstable / blocked / skip / error`，每层独立结论与理由；
+  判定：任一层 `fail` → `refuted`；适用层全 `pass` → `verified`；其余 → `uncertain`。
+  `skip` 是「该层对这个类别没有对象」（路径类命中没有可换的参数），不参与分母。
+- **传输层**：Python 侧出站被 `tools/check_offline.py` 禁着（产品纪律），所以新增引擎子命令
+  **`sweep replay`**（`engine-go/replay`）：发一次精确指定的请求，把 status/size/digest/headers/body
+  落成 `replay.json`；Python 侧 `vc/probe.py` 只读产物。引擎版本旧（没有 replay）时
+  `EngineProber.available()` 返回 False，明确提示「回落到整模式重跑」，**绝不假装跑过**。
+- **落库**：`findings` 加 `pipe_state / pipe_pass / pipe_layers / pipe_reason / pipe_poc / pipe_at`
+  与 `fb_state / fb_at`；新增 `feedback` 表（`UNIQUE(host, rule, param)`，`times` 累积次数）。
+  `pipe_state` 与 `verify_state` 是同一件事的两个投影：verified→仍存在、refuted→已消失、
+  uncertain/downgraded→无法判定，映射写死在 `verify.PIPE_TO_VERIFY` 一处。
+- **反馈闭环**：
+  - `kara verify <ID> --feedback --verdict 误报|真报 [--note …]` 写 `feedback` 表；台账 `--feedback-list`。
+  - **扫描入账时**：`(host, rule, param)` 被人工判过误报的新命中标成 `downgraded` 并注明
+    「历史人工判误报（N 次）」——不静默丢弃，也不照旧报高危。
+  - **复验时**：历史判过误报 → 三层全过也降级为 `uncertain` 并写明理由；机器判误报且历史一致 →
+    理由里标注一致；历史判过真报而本次没全过 → 提示人工复看。
+- **CLI**：`kara verify <ID …>` 位置参数（`--ids` 保留）；逐条打印三层 + 结论 + 最小复现；
+  `kara list` 加「三层」列（`✓3/3` / `✗1/2` / `—` / `⚠降级` / `✗人工`，分母=适用层数）与
+  全库汇总行；`--pipeline verified|refuted|uncertain|downgraded|unrun` 筛选；CSV 加三层三列、
+  MD 加「三层」列与抬头；`kara list -i` 详情展开三层。`verify --help` 写清三层与人工闭环。
+- 弱口令 / 配置检查（brute / baseline）**没有请求上下文可换**，仍走整模式重跑（`--legacy` 可强制）：
+  它们的假命中形态是「这次根本没测成」，不是全站 500。
+- `tests/test_pipeline.py`（新，29 用例）：**stdlib http.server 起真靶子 + http.client 真建连**，
+  覆盖真命中 / 全站 500 / 静态同形 / 偶发 5xx / WAF 拦截页 / 布尔对照不成立 / 最小化后消失 /
+  无 payload 时 L2 skip / 历史人工判误报降级 / 纯逻辑（任一层 fail、无响应、状态词表）。
+  `tests/test_pipeline_store.py`（新，24 用例）：落库、存活映射、台账累积、入账降级、
+  `--pipeline` 筛选、人工回写、CSV 三列、`verify --help`。
+- **294 个单测全绿**（存量 241 + 29 + 24）；`tools/check_offline.py` / `check_zero_deps.py` 通过。
+- 真机验证（回环靶子，非外网）：5 条命中跑出 `✓3/3`（payload 触发 500）、`✓1/1`（路径类，L2/L3 不适用）、
+  `⊘ blocked`（Cloudflare 拦截页）、`✗1/2`（布尔对照不成立）、`✓3/3`（读 /etc/passwd 且最小化成立）；
+  人工判误报后再命中 → `⚠降级`，复验结论写成「历史人工判误报（1 次）：本层没有定论，按人工结论一并降级」。
+
 ## 1.9.4 — 2026-11-19
 
 ### 新增 · list 的存活维度——每条命中回答「现在还活着吗」

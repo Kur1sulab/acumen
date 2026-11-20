@@ -6,7 +6,9 @@
     kara scan -t <目标> [-m 模式]      # 扫（-m strike 就是深度验证）
     kara list [-i 序号] [--assets]    # 看（列表 / 详情 / 资产 / 导出）
     kara list --liveness unverified   # 拎出从没复验过的命中（alive/dead/unverified/unknown/na）
-    kara verify [--ids …] [--deep]    # 复验（--deep 用验证内核真打）
+    kara list --pipeline refuted      # 看被三层判成误报的（verified/refuted/uncertain/downgraded/unrun）
+    kara verify [ID …] [--deep]       # 复验：三层流水线（L1 命中复核 → L2 → L3），--deep 用验证内核真打
+    kara verify <ID> --feedback --verdict 误报|真报   # 人工回写判定（误报闭环）
 
 约束：
   * 一条命令做一件事：没有子子命令、没有交互向导、没有配置文件。
@@ -29,6 +31,8 @@ from typing import Any, Dict, List, Optional
 
 from . import __version__
 from . import paths as kpaths
+from . import pipeline as pipemod
+from . import probe as probe_mod
 from . import report as kreport
 from . import scans as sc
 from . import verify as vfy
@@ -250,10 +254,19 @@ def _run_job_loop(mgr, job_id: int) -> str:
 
 
 def _ingest(ctx: Ctx) -> Dict[str, Any]:
+    t0 = time.strftime("%Y-%m-%d %H:%M:%S")   # 这一轮扫描的起始时刻：历史钩子只处理这批碰过的行
     stats = ctx.ingestor.scan() or {}
     print(f"{_c('[kara]', '36')} 入账：新解析 {stats.get('parsed', 0)} 个产物 · "
           f"漏洞 +{stats.get('findings_added', 0)} · 合并 {stats.get('findings_merged', 0)} · "
           f"资产 +{stats.get('assets', 0)} · 解析失败 {stats.get('errors', 0)}")
+    # 误报闭环的入账钩子：人判过误报的 (主机, 规则, 参数) 再次命中时降级并注明，
+    # 不静默丢弃（那是隐瞒）也不照旧报高危（那是无视人的判断）。
+    hist = vfy.apply_history(ctx.store, since=t0)
+    if hist.get("marked"):
+        print(f"{_c('[kara]', '36')} 历史人工结论生效：{hist['marked']} 条命中被降级待复核"
+              f"（{_c('kara list --pipeline downgraded', '36')}）")
+    stats = dict(stats)
+    stats["history_marked"] = hist.get("marked", 0)
     return stats
 
 
@@ -478,6 +491,10 @@ def cmd_list(ctx: Ctx, args: argparse.Namespace) -> int:
     try:
         liveness = _norm_liveness(getattr(args, "liveness", ""))
         waf = _norm_waf(getattr(args, "waf", ""))
+        pipeline = str(getattr(args, "pipeline", "") or "").strip()
+        if pipeline:
+            # 让错误在筛选前抛出，别等导出完才发现拼错了
+            Store._filter(pipeline=pipeline)
     except ValueError as exc:
         print(f"[!] {exc}", file=sys.stderr)
         return 2
@@ -486,10 +503,12 @@ def cmd_list(ctx: Ctx, args: argparse.Namespace) -> int:
         if args.csv:
             # 带 BOM：Windows Excel 双击不乱码
             data = ctx.store.export_csv(sev=args.sev, status=args.status, q=args.q,
-                                        liveness=liveness, waf=waf).encode("utf-8-sig")
+                                        liveness=liveness, waf=waf,
+                                        pipeline=pipeline).encode("utf-8-sig")
         else:
             rows = ctx.store.findings(sev=args.sev, status=args.status, q=args.q,
-                                      limit=10000, liveness=liveness, waf=waf)["rows"]
+                                      limit=10000, liveness=liveness, waf=waf,
+                                      pipeline=pipeline)["rows"]
             data = kreport.render(rows, title="空境 Kara 漏洞清单", db=ctx.db,
                                   notes=["按当前筛选条件导出的清单（与自动报告同一渲染器）"]).encode("utf-8")
         with open(out, "wb") as fh:
@@ -521,6 +540,8 @@ def cmd_list(ctx: Ctx, args: argparse.Namespace) -> int:
     # 这是全库口径（不随 --sev/--q/--liveness 变），筛选后的条数看底部「共 N 条」。
     summary = ctx.store.summary()
     print("存量　" + _liveness_line(vfy.liveness_summary(ctx.store.verify_stats())))
+    # 三层流水线紧跟存活：存活回答「还在不在」，三层回答「这个结论站不站得住」。
+    print("三层　" + _pipeline_line(summary.get("by_pipeline"), summary.get("findings") or 0))
     # WAF 三态紧跟存活：被拦的那批必须和「确认不存在」分两栏读，
     # 否则列表上同样一个 0 命中，谁也分不清是没东西还是被挡了。
     print("三态　" + _waf_line(summary.get("by_waf")))
@@ -531,24 +552,57 @@ def cmd_list(ctx: Ctx, args: argparse.Namespace) -> int:
                  f"换出口/降速/加白名单后重测才算数", "33"))
     print()
     data = ctx.store.findings(sev=args.sev, status=args.status, q=args.q,
-                              limit=args.limit, liveness=liveness, waf=waf)
+                              limit=args.limit, liveness=liveness, waf=waf, pipeline=pipeline)
     rows = data["rows"]
     if not rows:
         print("库里没有符合条件的条目。先 kara scan。")
         return 0
-    print(_table(["ID", "严重度", "存活", "WAF", "标题", "资产", "端点", "级别", "次数", "状态"],
-                 [[r["id"], _sev(r["sev"]), _live(vfy.liveness_of(r)), _cut(_waf_cell(r), 14),
+    print(_table(["ID", "严重度", "存活", "三层", "WAF", "标题", "资产", "端点", "级别", "次数", "状态"],
+                 [[r["id"], _sev(r["sev"]), _live(vfy.liveness_of(r)), _pipe_cell(r),
+                   _cut(_waf_cell(r), 14),
                    _cut(r["title"], 32), _cut(r["asset"], 20), _cut(r["endpoint"] or "-", 20),
                    _cut(_level_of(dict(r)), 12), r["count"], _cut(r["status"], 8)] for r in rows],
-                 [5, 8, 12, 14, 32, 20, 20, 12, 4, 8]))
+                 [5, 8, 12, 6, 14, 32, 20, 20, 12, 4, 8]))
     tail = (f"\n共 {data['total']} 条（显示 {len(rows)}）　详情 {_c('kara list -i <ID>', '36')}"
             f"　导出 {_c('kara list --csv out.csv', '36')}")
     if liveness == "UNVERIFIED":
         tail += f"\n复验这批：{_c('kara verify --liveness unverified', '36')}"
     if not waf:
         tail += f"\n只看被拦：{_c('kara list --waf blocked', '36')}"
+    if not pipeline:
+        tail += f"\n只看三层全过：{_c('kara list --pipeline verified', '36')}"
     print(tail)
     return 0
+
+
+def _pipe_cell(r: Any) -> str:
+    """list 的「三层」列：✓3/3、✗1/2、—（没跑）、⚠降级、✗人工（人已判误报）。"""
+    def get(k: str) -> str:
+        try:
+            return str(r[k] or "")
+        except (KeyError, IndexError, TypeError):
+            return ""
+
+    fb = get("fb_state")
+    if fb == pipemod.REFUTED:
+        return "✗人工"
+    if fb == pipemod.VERIFIED:
+        return "✓人工"
+    return pipemod.badge(vfy.pipeline_of(r))
+
+
+def _pipeline_line(by_pipe: Optional[List[Dict[str, Any]]], total: int) -> str:
+    """抬头一行：三层全过 / 存疑 / 误报 / 降级 / 未跑（各桶之和 == 命中总数）。"""
+    n = {str(r.get("pipe_state") or ""): int(r.get("n") or 0) for r in (by_pipe or [])}
+    done = sum(v for k, v in n.items() if k)
+    buckets = (("✓ 全过", n.get("verified", 0), "32"), ("? 存疑", n.get("uncertain", 0), "33"),
+               ("✗ 误报", n.get("refuted", 0), "31"), ("⚠ 降级", n.get("downgraded", 0), "33"),
+               ("— 未跑", max(0, int(total) - done), "90"))
+    out = []
+    for label, num, color in buckets:
+        txt = f"{label} {num}"
+        out.append(_c(txt, color) if num else _c(txt, "90"))
+    return " · ".join(out)
 
 
 def _show_one(ctx: Ctx, row_id: int) -> int:
@@ -575,6 +629,25 @@ def _show_one(ctx: Ctx, row_id: int) -> int:
         print(f"  WAF　　 {wafmod.label(r['waf_state'])}{who}　"
               + ("被拦 ≠ 不存在：换出口/降速后重测再下结论"
                  if r["waf_state"] == wafmod.BLOCKED else ""))
+    if vfy.has_layers(r):
+        # 三层结论是这条命中的「凭什么算命中」，和复验状态分两段读
+        res = vfy.pipeline_of(r)
+        print("  三层　　" + f"{pipemod.VERDICT_SYMBOLS.get(res['verdict'], '?')} "
+              f"{pipemod.VERDICT_LABELS.get(res['verdict'], res['verdict'])}"
+              f"　{_cut(res['reason'], 120)}")
+        for n in pipemod.LAYERS:
+            item = res["layers"].get(n) or {}
+            if not item:
+                continue
+            print(f"　　{n} {pipemod.LAYER_TITLES[n]}\u3000"
+                  f"{pipemod.STATE_SYMBOLS.get(item.get('state'), '?')} "
+                  f"{pipemod.STATE_LABELS.get(item.get('state'), item.get('state'))}\u3000"
+                  f"{_cut(item.get('reason') or '', 90)}")
+        if res.get("minimal_curl"):
+            print(f"  最小复现\u3000{_c(res['minimal_curl'], '36')}")
+    if r.get("fb_state"):
+        human = "误报" if pipemod.norm_human(r["fb_state"]) == pipemod.REFUTED else "真报"
+        print(f"  人工　　{human}（{r.get('fb_at') or ''}）——历史判定会参与后续复验")
     if r.get("repro"):
         print(f"  复现　　{_c(str(r['repro']), '36')}")
     print(f"  产物　　{r.get('files') or '-'}")
@@ -601,24 +674,150 @@ def _target_of(row: Dict[str, Any]) -> str:
     return ""
 
 
+def _verify_rows(ctx: Ctx, args: argparse.Namespace) -> List[Dict[str, Any]]:
+    """挑要复验的命中：位置参数 / --ids 优先，其次按筛选条件。"""
+    raw = " ".join(str(x) for x in (getattr(args, "ids_pos", None) or []))
+    if getattr(args, "ids", ""):
+        raw = f"{raw} {args.ids}"
+    ids = [int(x) for x in raw.replace(",", " ").split() if x.strip().lstrip("-").isdigit()]
+    if ids:
+        got = {int(r["id"]): dict(r) for r in ctx.store.findings_by_ids(ids)}
+        return [got[i] for i in ids if i in got]     # 按用户给的顺序，别让库的顺序打乱输出
+    liveness = _norm_liveness(getattr(args, "liveness", ""))
+    pipeline = str(getattr(args, "pipeline", "") or "")
+    return [dict(r) for r in ctx.store.findings(sev=args.sev, status=args.status,
+                                                limit=args.limit, liveness=liveness,
+                                                pipeline=pipeline)["rows"]]
+
+
 def cmd_verify(ctx: Ctx, args: argparse.Namespace) -> int:
+    if getattr(args, "feedback_list", False):
+        return _cmd_feedback_list(ctx, args)
     try:
-        liveness = _norm_liveness(getattr(args, "liveness", ""))
+        rows = _verify_rows(ctx, args)
     except ValueError as exc:
         print(f"[!] {exc}", file=sys.stderr)
         return 2
-    if args.ids:
-        ids = [int(x) for x in args.ids.replace(",", " ").split() if x.strip().isdigit()]
-        rows = [dict(r) for r in ctx.store.findings_by_ids(ids)]
-    else:
-        rows = [dict(r) for r in ctx.store.findings(sev=args.sev, status=args.status,
-                                                   limit=args.limit, liveness=liveness)["rows"]]
+    if getattr(args, "feedback", False):
+        return _cmd_feedback(ctx, rows, args)
     if not rows:
         print("没有要复验的条目。")
         return 0
     if args.deep:
         return _verify_deep(ctx, rows, args)
 
+    rest = rows
+    if not getattr(args, "legacy", False):
+        mgr = ctx.manager()
+        if not mgr.engine:
+            print(_c("[i] 没找到引擎：三层流水线发不出请求，回落到整模式重跑复验\n" + sc.ENGINE_HINT, "33"),
+                  file=sys.stderr)
+        else:
+            with probe_mod.EngineProber(mgr.engine, timeout=getattr(args, "probe_timeout", 10)) as pr:
+                if pr.available():
+                    rest = _verify_layers(ctx, rows, args, pr)
+                else:
+                    print(_c("[i] 引擎没有 replay 子命令（版本旧）：本次回落到整模式重跑复验。\n"
+                             "    三层流水线要「换参数名再打一枪」，老引擎给不了这个控制。", "33"),
+                          file=sys.stderr)
+    if rest:
+        return _verify_legacy(ctx, rest, args)
+    return 0
+
+
+def _verify_layers(ctx: Ctx, rows: List[Dict[str, Any]], args: argparse.Namespace,
+                   prober) -> List[Dict[str, Any]]:
+    """三层流水线：逐条跑、逐条打印、逐条落库。返回没能走流水线的行（交给老路径）。"""
+    todo = [r for r in rows if pipemod.applicable(r)]
+    rest = [r for r in rows if not pipemod.applicable(r)]
+    if not todo:
+        return rows
+
+    print(f"三层复验 {len(todo)} 条　L1 命中复核 → L2 上下文复核 → L3 最小化 PoC")
+
+    def on_row(row: Dict[str, Any], res: Dict[str, Any]) -> None:
+        print()
+        print(f"{_c('#' + str(row.get('id')), '1')} {_cut(row.get('title') or '', 52)}　"
+              f"{_sev(row.get('sev') or 'info')}　{_cut(str(row.get('sources') or ''), 20)}")
+        ep = str(row.get("endpoint") or "")
+        entry = ep if ep.startswith("http") else f"{pipemod.base_of(row)}{ep}"
+        print(f"  入口　{entry}")
+        print(pipemod.format_layers(res))
+
+    results = vfy.run_layers(ctx.store, todo, prober=prober, on_row=on_row)
+    print()
+    counts = _verdict_counts([r["result"] for r in results])
+    order = (pipemod.VERIFIED, pipemod.REFUTED, pipemod.UNCERTAIN, pipemod.DOWNGRADED)
+    labels = dict(pipemod.VERDICT_LABELS, **{pipemod.DOWNGRADED: "降级（历史人工判误报）"})
+    syms = dict(pipemod.VERDICT_SYMBOLS, **{pipemod.DOWNGRADED: "⚠"})
+    print(f"{_c('[kara]', '36')} 三层完成　"
+          + "　".join(f"{syms[v]} {labels[v]} {counts[v]}" for v in order if counts.get(v)))
+    print(f"  明细 {_c('kara list --pipeline refuted', '36')}　"
+          f"只回看结论 {_c('kara list -i <ID>', '36')}　"
+          f"人工回写 {_c('kara verify <ID> --feedback --verdict 误报', '36')}")
+    return rest
+
+
+def _verdict_counts(results: List[Dict[str, Any]]) -> Dict[str, int]:
+    out = {v: 0 for v in pipemod.VERDICTS}
+    out[pipemod.DOWNGRADED] = 0
+    for r in results:
+        r = r or {}
+        key = pipemod.DOWNGRADED if r.get("history_downgraded") else str(r.get("verdict") or "")
+        if key in out:
+            out[key] += 1
+    return out
+
+
+def _cmd_feedback(ctx: Ctx, rows: List[Dict[str, Any]], args: argparse.Namespace) -> int:
+    """人工回写：误报 / 真报。写进 feedback 表，按 (host, rule, param) 累积。"""
+    if not rows:
+        print("[!] --feedback 要指定一条命中的序号，例如：kara verify 12 --feedback --verdict 误报",
+              file=sys.stderr)
+        return 2
+    if len(rows) > 20:
+        print(f"[!] 一次最多回写 20 条（给了 {len(rows)} 条）：人工判定要人真的看过", file=sys.stderr)
+        return 2
+    code = 0
+    for row in rows:
+        res = vfy.feedback(ctx.store, row, args.verdict, args.note or "")
+        if not res.get("ok"):
+            print(f"[!] {res.get('error')}", file=sys.stderr)
+            return 2
+        human = "误报" if res["verdict"] == pipemod.REFUTED else "真报"
+        print(f"已记下人工判定：#{row.get('id')} {_cut(row.get('title') or '', 40)} → {human}"
+              f"　（{res['host']} / {res['param'] or '无参数'} 已累计 {res['times']} 次）")
+        if res["verdict"] == pipemod.REFUTED:
+            print("  这条历史会参与判定：同一规则再次命中时降级为「存疑」并标注「历史人工判误报」，"
+                  "不会静默丢弃")
+        else:
+            print("  下次复验若三层没全过，会提示「历史人工已确认」以免被误判成消失")
+    print(f"\n查看人工判定台账：{_c('kara verify --feedback-list', '36')}")
+    return code
+
+
+def _cmd_feedback_list(ctx: Ctx, args: argparse.Namespace) -> int:
+    rows = ctx.store.feedback_rows(limit=getattr(args, "limit", 200) or 200)
+    if not rows:
+        print("还没有人工判定记录。回写一条：kara verify <ID> --feedback --verdict 误报")
+        return 0
+    print(_table(["主机", "规则", "参数", "判定", "次数", "最近", "备注"],
+                 [[_cut(r.get("host") or "-", 24), _cut(r.get("rule") or "-", 30),
+                   _cut(r.get("param") or "-", 14),
+                   "误报" if pipemod.norm_human(r.get("verdict")) == pipemod.REFUTED else "真报",
+                   r.get("times") or 1, _cut(r.get("at") or "", 19), _cut(r.get("note") or "", 30)]
+                  for r in rows],
+                 [24, 30, 14, 6, 4, 19, 30]))
+    print(f"\n共 {len(rows)} 条人工判定。这些结论会在扫描入账与复验时参与判定。")
+    return 0
+
+
+def _verify_legacy(ctx: Ctx, rows: List[Dict[str, Any]], args: argparse.Namespace) -> int:
+    """老路径：按当初发现它的模式整组重跑，看同标题命中还在不在。
+
+    没有请求上下文可换的类别（弱口令、配置检查）走这条：它们的「假命中」形态
+    不是全站 500 / WAF 拦截页，而是「这次根本没测成」，重跑判可达性才是对的。
+    """
     mgr = ctx.manager()
     if not mgr.engine:
         print(_c(sc.ENGINE_HINT, "31"), file=sys.stderr)
@@ -736,20 +935,49 @@ def build_parser() -> argparse.ArgumentParser:
                    help="存活状态：alive / dead / unverified / unknown / na")
     p.add_argument("--waf", default="", metavar="STATE",
                    help="WAF 三态：blocked（被拦）/ absent（真不存在）/ unknown（不确定）/ present")
+    p.add_argument("--pipeline", default="", metavar="STATE",
+                   help="三层结论：verified（全过）/ refuted / uncertain / downgraded / unrun")
     p.add_argument("--q", default="", help="关键词")
     p.add_argument("--limit", type=int, default=50)
     p.add_argument("--csv", default="", help="导出 CSV 到该文件")
     p.add_argument("--md", default="", help="导出 Markdown 到该文件")
     p.set_defaults(func=cmd_list)
 
-    p = sub.add_parser("verify", help="复验（--deep 用验证内核真打）")
+    p = sub.add_parser(
+        "verify", help="复验：三层流水线（L1 命中复核 → L2 上下文复核 → L3 最小化 PoC）",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="复验：把「扫出来的结果」变成「能复现的结论」。默认走三层流水线。",
+        epilog="""三层判定（任一层不通过就不算确认）
+  L1 命中复核     原请求重放两次 + 无害对照：全站 500 / 静态同形 / 偶发 5xx / WAF 拦截页
+                  全部挡在这里。被拦 = blocked（不下结论），不是 fail。
+  L2 上下文复核   同位置换无害值、payload 换参数名/位置重放；SQLi 另做布尔对照
+                  （1=1 vs 1=2，响应一致 = 布尔差异不成立 → 判误报）。
+  L3 最小化 PoC   剥掉无关参数只留 payload 再打一次，产出能直接粘进报告的最小复现串；
+                  剥完现象消失 = 现象不稳（存疑）。
+
+结论：verified（三层全过）/ refuted（有层不通过）/ uncertain（证据不足）。
+人工闭环：kara verify <ID> --feedback --verdict 误报|真报　（台账：--feedback-list）
+历史人工判过误报的 (主机, 规则, 参数) 再次命中时降级为「存疑」并注明，不会静默丢弃。
+弱口令 / 配置检查没有请求上下文可换，仍走整模式重跑（--legacy 可强制）。""")
+    p.add_argument("ids_pos", nargs="*", metavar="ID", help="命中序号，如 12 15 19（也可用 --ids 12,15）")
     p.add_argument("--ids", default="", help="如 12,15,19；不给就按筛选批量")
+    p.add_argument("--feedback", action="store_true",
+                   help="人工回写判定（配 --verdict 误报/真报），写进反馈闭环")
+    p.add_argument("--feedback-list", action="store_true", help="看人工判定台账")
+    p.add_argument("--verdict", default="",
+                   help="仅 --feedback：误报 / 真报（也收 false-positive / true-positive）")
+    p.add_argument("--note", default="", help="仅 --feedback：备注（写进台账）")
     p.add_argument("--target", action="append", default=[], help="仅 --deep：直接指定目标")
     p.add_argument("--sev", default="", choices=["", "critical", "high", "medium", "low", "info"])
     p.add_argument("--status", default="")
     p.add_argument("--liveness", default="", metavar="STATE",
                    help="按存活状态挑命中：alive / dead / unverified / unknown / na（--ids 优先）")
+    p.add_argument("--pipeline", default="", metavar="STATE",
+                   help="按三层结论挑命中：verified / refuted / uncertain / downgraded / unrun")
     p.add_argument("--limit", type=int, default=50)
+    p.add_argument("--legacy", action="store_true",
+                   help="跳过三层流水线，按老办法整模式重跑（引擎没有 replay 时的兜底）")
+    p.add_argument("--probe-timeout", type=int, default=10, help="单次探测超时秒数（默认 10）")
     p.add_argument("--deep", action="store_true", help="深度验证（会真发请求）")
     p.add_argument("--dry-run", action="store_true", help="仅 --deep：只列目标，不发请求")
     p.add_argument("--ports", default="", help="仅 --deep：top100 / full / 80,443")

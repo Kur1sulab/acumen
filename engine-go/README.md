@@ -39,6 +39,7 @@ C:/Go/go/bin/go.exe test ./...                              # 全部单测 + Pyt
 | `portscan -t` | `modules.portscan` | ✅ 已移植（96 端口常用表 + banner 轻量识别；并发 ≤32 / 超时 1.5s；`--ports 80,443,8000-8100`） |
 | `poc -t -p` | `modules.poc_engine`（YAML 引擎） | ✅ c2（gopkg.in/yaml.v3，仓库唯一第三方依赖） |
 | `patchdiff -r` | `modules.patchdiff` | ✅ 已移植（本地 git 子进程 + 12/8 条信号表 + semgrep 规则骨架；`--commit/--range/--limit/--emit-rule`；零外联） |
+| `replay -u <url>` | 无（Go 侧新增） | ✅ v1.10.0（单次精确请求 → `replay.json`：status/size/digest/headers/body/ms；供 Python 三层复验流水线当传输层用。不探测、不做基线，`--no-redirect` / `--data` / `--header` / `--timeout`；传输失败 status=0 + error 且 exit 0） |
 | `llm -d` | ~~`modules.llm_assist`~~ | ❌ **不移植，弃用**（Python 版也已整体移除该模块，两侧行为一致：提示并 exit 2） |
 | `report -t` | `modules.report` | ✅ c2（资产档案 + 证据包 zip） |
 
